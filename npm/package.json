@@ -19,12 +19,16 @@
   ],
   "keywords": [
     "mcp",
+    "mcp-server",
     "godot",
     "gdscript",
     "lsp",
     "code-analysis",
-    "ai",
-    "semantic-analysis"
+    "code-intelligence",
+    "semantic-analysis",
+    "ai-agents",
+    "claude",
+    "developer-tools"
   ],
   "engines": {
     "node": ">=16"
