@@ -1,0 +1,32 @@
+{
+  "name": "godotlens-mcp",
+  "version": "1.0.0",
+  "description": "MCP server providing 15 AI-optimized tools for GDScript code analysis via Godot's built-in LSP",
+  "license": "MIT",
+  "author": "Peter Zalutski",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pzalutski-pixel/godotlens-mcp.git"
+  },
+  "homepage": "https://github.com/pzalutski-pixel/godotlens-mcp",
+  "bin": {
+    "godotlens-mcp": "./bin/godotlens-mcp.js"
+  },
+  "files": [
+    "bin/",
+    "server/",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "godot",
+    "gdscript",
+    "lsp",
+    "code-analysis",
+    "ai",
+    "semantic-analysis"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}
