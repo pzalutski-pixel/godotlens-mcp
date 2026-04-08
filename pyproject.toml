@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "godotlens-mcp"
-version = "1.0.2"
+version = "1.0.3"
 description = "MCP server providing 15 AI-optimized tools for GDScript code analysis via Godot's built-in LSP"
 readme = "README.md"
 requires-python = ">=3.10"
