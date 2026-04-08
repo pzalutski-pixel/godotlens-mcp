@@ -1,0 +1,59 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pzalutski-pixel/godotlens",
+  "title": "GodotLens",
+  "description": "15 semantic GDScript analysis tools via Godot's built-in LSP: navigation, references, diagnostics, rename.",
+  "repository": {
+    "url": "https://github.com/pzalutski-pixel/godotlens-mcp",
+    "source": "github"
+  },
+  "version": "1.0.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "godotlens-mcp",
+      "version": "1.0.2",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "GODOT_LSP_HOST",
+          "description": "Godot LSP server host",
+          "format": "string",
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "GODOT_LSP_PORT",
+          "description": "Godot LSP server port",
+          "format": "number",
+          "default": "6005"
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "identifier": "godotlens-mcp",
+      "version": "1.0.2",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "GODOT_LSP_HOST",
+          "description": "Godot LSP server host",
+          "format": "string",
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "GODOT_LSP_PORT",
+          "description": "Godot LSP server port",
+          "format": "number",
+          "default": "6005"
+        }
+      ]
+    }
+  ]
+}

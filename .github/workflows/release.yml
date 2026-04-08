@@ -1,4 +1,4 @@
-name: Release to PyPI and npm
+name: Release to PyPI, npm, and MCP Registry
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   test:
@@ -75,8 +76,33 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  github-release:
+  publish-mcp-registry:
     needs: [publish-pypi, publish-npm]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set version in server.json
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[].version = $v' server.json > server.tmp && mv server.tmp server.json
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
+
+  github-release:
+    needs: [publish-pypi, publish-npm, publish-mcp-registry]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

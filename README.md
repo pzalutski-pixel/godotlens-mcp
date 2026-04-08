@@ -146,3 +146,5 @@ All line and character parameters are **0-indexed**, matching the LSP specificat
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
+
+<!-- mcp-name: io.github.pzalutski-pixel/godotlens -->

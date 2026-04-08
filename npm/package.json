@@ -1,5 +1,6 @@
 {
   "name": "godotlens-mcp",
+  "mcpName": "io.github.pzalutski-pixel/godotlens",
   "version": "1.0.0",
   "description": "MCP server providing 15 AI-optimized tools for GDScript code analysis via Godot's built-in LSP",
   "license": "MIT",
