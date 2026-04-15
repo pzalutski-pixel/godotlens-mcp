@@ -63,82 +63,117 @@ TOOLS = [
     # Health
     {
         "name": "gdscript_status",
-        "description": "Check if Godot LSP is connected",
+        "description": (
+            "Check connection status to the Godot LSP server. "
+            "Returns: connection status, host, and port. "
+            "Use this to verify Godot editor is running before using other tools. "
+            "If disconnected, start Godot editor with your project open."
+        ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     # Navigation
     {
         "name": "gdscript_definition",
-        "description": "Go to definition of a symbol",
+        "description": (
+            "Navigate to the definition of a symbol at a given position. "
+            "Returns: file path and line number where the symbol is defined. "
+            "IMPORTANT: Uses ZERO-BASED coordinates (editor line 1 = pass line 0). "
+            "Use when you need to find where a function, variable, or class is defined."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
-                "line": {"type": "integer", "description": "Line number (0-indexed)"},
-                "character": {"type": "integer", "description": "Character position (0-indexed)"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
             },
             "required": ["file", "line", "character"],
         },
     },
     {
         "name": "gdscript_declaration",
-        "description": "Go to declaration of a symbol",
+        "description": (
+            "Navigate to the declaration of a symbol at a given position. "
+            "Returns: file path and line number of the declaration. "
+            "IMPORTANT: Uses ZERO-BASED coordinates (editor line 1 = pass line 0). "
+            "Similar to gdscript_definition but returns the declaration site."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
-                "line": {"type": "integer", "description": "Line number (0-indexed)"},
-                "character": {"type": "integer", "description": "Character position (0-indexed)"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
             },
             "required": ["file", "line", "character"],
         },
     },
     {
         "name": "gdscript_references",
-        "description": "Find all references to a symbol",
+        "description": (
+            "Find all references to a symbol across the entire project. "
+            "Returns: list of locations (file, line, character) where the symbol is used. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "Essential for impact analysis before refactoring: 'What code uses this symbol?'"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
-                "line": {"type": "integer", "description": "Line number (0-indexed)"},
-                "character": {"type": "integer", "description": "Character position (0-indexed)"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
             },
             "required": ["file", "line", "character"],
         },
     },
     {
         "name": "gdscript_hover",
-        "description": "Get hover information for a symbol",
+        "description": (
+            "Get type information and documentation for a symbol at a given position. "
+            "Returns: type signature, documentation string, or description of the symbol. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "Use to understand what type a variable is, or what a function returns."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
-                "line": {"type": "integer", "description": "Line number (0-indexed)"},
-                "character": {"type": "integer", "description": "Character position (0-indexed)"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
             },
             "required": ["file", "line", "character"],
         },
     },
     {
         "name": "gdscript_symbols",
-        "description": "List all symbols in a file",
+        "description": (
+            "List all symbols (classes, functions, variables, signals, enums) in a file. "
+            "Returns: symbol tree with name, kind, and line number for each symbol. "
+            "Use to understand the structure of a file before making changes. "
+            "WORKFLOW: gdscript_symbols to explore, then gdscript_hover or gdscript_definition for details."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
             },
             "required": ["file"],
         },
     },
     {
         "name": "gdscript_signature_help",
-        "description": "Get function signature at position",
+        "description": (
+            "Get function signature and parameter information at a call site. "
+            "Returns: function name, parameters with types, and return type. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "Use when you need to know the correct parameters for a function call."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
-                "line": {"type": "integer", "description": "Line number (0-indexed)"},
-                "character": {"type": "integer", "description": "Character position (0-indexed)"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
             },
             "required": ["file", "line", "character"],
         },
@@ -146,13 +181,19 @@ TOOLS = [
     # Refactoring
     {
         "name": "gdscript_rename",
-        "description": "Rename a symbol across all files",
+        "description": (
+            "Rename a symbol across all files in the project. "
+            "Returns: workspace edit with all changes needed. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "WORKFLOW: (1) gdscript_references to preview impact, "
+            "(2) gdscript_rename to rename, (3) gdscript_sync_files to refresh LSP state."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
-                "line": {"type": "integer", "description": "Line number (0-indexed)"},
-                "character": {"type": "integer", "description": "Character position (0-indexed)"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
                 "new_name": {"type": "string", "description": "New name for the symbol"},
             },
             "required": ["file", "line", "character", "new_name"],
@@ -161,14 +202,20 @@ TOOLS = [
     # Sync operations
     {
         "name": "gdscript_sync_file",
-        "description": "Notify LSP that a file changed",
+        "description": (
+            "Notify Godot's LSP that a file was modified and get updated diagnostics. "
+            "Returns: diagnostics (errors/warnings) for the synced file. "
+            "WHEN TO CALL: After using Edit/Write tools to modify a .gd file. "
+            "The LSP does not watch files, so you must call this to refresh analysis. "
+            "Optionally pass content directly to avoid reading from disk."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path"},
+                "file": {"type": "string", "description": "Absolute or relative path to the modified .gd file"},
                 "content": {
                     "type": "string",
-                    "description": "File content (optional, reads from disk if not provided)",
+                    "description": "File content to sync (optional, reads from disk if not provided)",
                 },
             },
             "required": ["file"],
@@ -176,22 +223,37 @@ TOOLS = [
     },
     {
         "name": "gdscript_sync_files",
-        "description": "Notify LSP that multiple files changed",
+        "description": (
+            "Batch sync multiple modified files with Godot's LSP. "
+            "Returns: diagnostics for all synced files. "
+            "WHEN TO CALL: After modifying multiple .gd files with Edit/Write tools. "
+            "More efficient than calling gdscript_sync_file repeatedly. "
+            "Reads content from disk for all specified files."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "files": {"type": "array", "items": {"type": "string"}, "description": "List of file paths"},
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of absolute or relative paths to modified .gd files",
+                },
             },
             "required": ["files"],
         },
     },
     {
         "name": "gdscript_delete_file",
-        "description": "Notify LSP that a file was deleted",
+        "description": (
+            "Notify Godot's LSP that a file was deleted from the project. "
+            "Returns: confirmation of deletion. "
+            "WHEN TO CALL: After deleting a .gd file from disk. "
+            "Ensures LSP removes the file from its analysis and clears stale diagnostics."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "File path that was deleted"},
+                "file": {"type": "string", "description": "Absolute or relative path to the deleted .gd file"},
             },
             "required": ["file"],
         },
@@ -199,18 +261,32 @@ TOOLS = [
     # Batch operations
     {
         "name": "gdscript_symbols_batch",
-        "description": "Get symbols from multiple files",
+        "description": (
+            "Get symbols from multiple files in a single call. "
+            "Returns: map of file path to symbol tree for each file. "
+            "More efficient than calling gdscript_symbols repeatedly. "
+            "Use to understand the structure of multiple files at once."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "files": {"type": "array", "items": {"type": "string"}, "description": "List of file paths"},
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of absolute or relative paths to .gd files",
+                },
             },
             "required": ["files"],
         },
     },
     {
         "name": "gdscript_definitions_batch",
-        "description": "Get definitions for multiple positions",
+        "description": (
+            "Get definitions for multiple symbol positions in a single call. "
+            "Returns: list of definition locations for each position. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "More efficient than calling gdscript_definition repeatedly."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -219,13 +295,13 @@ TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "file": {"type": "string"},
-                            "line": {"type": "integer"},
-                            "character": {"type": "integer"},
+                            "file": {"type": "string", "description": "Path to .gd file"},
+                            "line": {"type": "integer", "description": "Zero-based line number"},
+                            "character": {"type": "integer", "description": "Zero-based character position"},
                         },
                         "required": ["file", "line", "character"],
                     },
-                    "description": "List of positions",
+                    "description": "List of positions to look up definitions for",
                 },
             },
             "required": ["positions"],
@@ -233,7 +309,13 @@ TOOLS = [
     },
     {
         "name": "gdscript_references_batch",
-        "description": "Find references for multiple positions",
+        "description": (
+            "Find references for multiple symbols in a single call. "
+            "Returns: list of reference locations for each position. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "More efficient than calling gdscript_references repeatedly. "
+            "Use for bulk impact analysis across multiple symbols."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -242,13 +324,13 @@ TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "file": {"type": "string"},
-                            "line": {"type": "integer"},
-                            "character": {"type": "integer"},
+                            "file": {"type": "string", "description": "Path to .gd file"},
+                            "line": {"type": "integer", "description": "Zero-based line number"},
+                            "character": {"type": "integer", "description": "Zero-based character position"},
                         },
                         "required": ["file", "line", "character"],
                     },
-                    "description": "List of positions",
+                    "description": "List of positions to find references for",
                 },
             },
             "required": ["positions"],
@@ -256,11 +338,21 @@ TOOLS = [
     },
     {
         "name": "gdscript_diagnostics",
-        "description": "Get diagnostics (errors/warnings) for files",
+        "description": (
+            "Get compiler errors and warnings for one or more files. "
+            "Returns: list of diagnostics with line, severity (1=Error, 2=Warning, 3=Info, 4=Hint), and message. "
+            "WORKFLOW: (1) Edit files, (2) gdscript_sync_files to refresh, "
+            "(3) gdscript_diagnostics to check for errors. "
+            "Use before committing to catch issues early."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "files": {"type": "array", "items": {"type": "string"}, "description": "List of file paths"},
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of absolute or relative paths to .gd files to check",
+                },
             },
             "required": ["files"],
         },

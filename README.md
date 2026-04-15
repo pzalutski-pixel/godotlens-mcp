@@ -73,46 +73,46 @@ pip install godotlens-mcp
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_status` | Check if Godot LSP is connected |
+| `gdscript_status` | Check connection to Godot LSP. Use to verify editor is running before other tools. |
 
 ### Navigation (6 tools)
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_definition` | Go to definition of a symbol |
-| `gdscript_declaration` | Go to declaration of a symbol |
-| `gdscript_references` | Find all references to a symbol |
-| `gdscript_hover` | Get hover information (type, docs) for a symbol |
-| `gdscript_symbols` | List all symbols in a file |
-| `gdscript_signature_help` | Get function signature at call site |
+| `gdscript_definition` | Navigate to where a symbol is defined. Returns file path and line number. |
+| `gdscript_declaration` | Navigate to the declaration site of a symbol. |
+| `gdscript_references` | Find all references to a symbol across the project. Essential for impact analysis before refactoring. |
+| `gdscript_hover` | Get type information and documentation for a symbol. Use to understand types and return values. |
+| `gdscript_symbols` | List all symbols (classes, functions, variables, signals) in a file. Use to explore file structure. |
+| `gdscript_signature_help` | Get function signature and parameter info at a call site. |
 
 ### Refactoring
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_rename` | Rename a symbol across all files |
+| `gdscript_rename` | Rename a symbol across all files. Workflow: references to preview impact, rename, then sync. |
 
 ### Synchronization (3 tools)
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_sync_file` | Notify LSP that a file changed, returns diagnostics |
-| `gdscript_sync_files` | Batch sync multiple files |
-| `gdscript_delete_file` | Notify LSP that a file was deleted |
+| `gdscript_sync_file` | Sync a modified file with the LSP and get updated diagnostics. Call after editing .gd files. |
+| `gdscript_sync_files` | Batch sync multiple modified files. More efficient than syncing individually. |
+| `gdscript_delete_file` | Notify LSP a file was deleted. Clears stale diagnostics. |
 
 ### Batch Operations (3 tools)
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_symbols_batch` | Get symbols from multiple files |
-| `gdscript_definitions_batch` | Get definitions for multiple positions |
-| `gdscript_references_batch` | Find references for multiple positions |
+| `gdscript_symbols_batch` | Get symbols from multiple files in one call. |
+| `gdscript_definitions_batch` | Get definitions for multiple positions in one call. |
+| `gdscript_references_batch` | Find references for multiple symbols in one call. Use for bulk impact analysis. |
 
 ### Diagnostics
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_diagnostics` | Get errors/warnings for files |
+| `gdscript_diagnostics` | Get compiler errors and warnings. Workflow: edit, sync, then diagnostics to verify. |
 
 ## Architecture
 
