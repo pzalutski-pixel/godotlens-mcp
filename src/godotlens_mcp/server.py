@@ -18,36 +18,25 @@ _lsp: LSPClient | None = None
 
 
 # ---------------------------------------------------------------------------
-# MCP protocol handler (JSON-RPC 2.0 over stdio with Content-Length framing)
+# MCP protocol handler (JSON-RPC 2.0 over stdio, newline-delimited)
 # ---------------------------------------------------------------------------
 
-async def read_message(reader: asyncio.StreamReader) -> dict | None:
-    """Read a Content-Length framed JSON-RPC message from the stream."""
-    headers: dict[str, str] = {}
-    while True:
-        line = await reader.readline()
-        if not line:
-            return None  # EOF
-        line = line.decode("utf-8").strip()
-        if not line:
-            break
-        if ":" in line:
-            key, val = line.split(":", 1)
-            headers[key.strip()] = val.strip()
-
-    length = int(headers.get("Content-Length", 0))
-    if length == 0:
+async def read_message() -> dict | None:
+    """Read a newline-delimited JSON-RPC message from stdin."""
+    loop = asyncio.get_event_loop()
+    line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+    if not line:
+        return None  # EOF
+    line = line.strip()
+    if not line:
         return None
-
-    body = await reader.readexactly(length)
-    return json.loads(body.decode("utf-8"))
+    return json.loads(line.decode("utf-8"))
 
 
 def write_message(data: dict) -> None:
-    """Write a Content-Length framed JSON-RPC message to stdout."""
-    body = json.dumps(data).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
-    sys.stdout.buffer.write(header + body)
+    """Write a newline-delimited JSON-RPC message to stdout."""
+    line = json.dumps(data) + "\n"
+    sys.stdout.buffer.write(line.encode("utf-8"))
     sys.stdout.buffer.flush()
 
 
@@ -593,13 +582,9 @@ async def main():
     port = int(os.environ.get("GODOT_LSP_PORT", "6005"))
     _lsp = LSPClient(host=host, port=port)
 
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin.buffer)
-
     try:
         while True:
-            msg = await read_message(reader)
+            msg = await read_message()
             if msg is None:
                 break
             response = await handle_request(msg)

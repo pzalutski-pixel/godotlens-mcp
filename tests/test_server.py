@@ -1,11 +1,14 @@
 """Tests for the MCP server — tool dispatch with mocked LSP client."""
 
+import io
 import json
+import subprocess
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from godotlens_mcp.server import TOOLS, handle_request, handle_tool_call
+from godotlens_mcp.server import TOOLS, handle_request, handle_tool_call, read_message, write_message
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -213,3 +216,79 @@ async def test_batch_symbols_per_file_errors():
     data = json.loads(result["content"][0]["text"])
     assert len(data["good.gd"]) == 1
     assert "error" in data["bad.gd"]
+
+
+# ---------------------------------------------------------------------------
+# MCP stdio protocol — read/write
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_read_message_parses_json_line():
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    line = json.dumps(msg) + "\n"
+    fake_buffer = io.BytesIO(line.encode("utf-8"))
+    with patch("godotlens_mcp.server.sys") as mock_sys:
+        mock_sys.stdin.buffer = fake_buffer
+        result = await read_message()
+    assert result == msg
+
+
+@pytest.mark.asyncio
+async def test_read_message_returns_none_on_eof():
+    fake_buffer = io.BytesIO(b"")
+    with patch("godotlens_mcp.server.sys") as mock_sys:
+        mock_sys.stdin.buffer = fake_buffer
+        result = await read_message()
+    assert result is None
+
+
+def test_write_message_outputs_newline_delimited_json():
+    buf = io.BytesIO()
+    fake_stdout = type("FakeStdout", (), {"buffer": buf, "flush": lambda self: None})()
+    with patch("godotlens_mcp.server.sys") as mock_sys:
+        mock_sys.stdout = fake_stdout
+        msg = {"jsonrpc": "2.0", "id": 1, "result": {}}
+        write_message(msg)
+    output = buf.getvalue().decode("utf-8")
+    assert output.endswith("\n")
+    parsed = json.loads(output.strip())
+    assert parsed == msg
+
+
+# ---------------------------------------------------------------------------
+# Integration test — full stdio round-trip
+# ---------------------------------------------------------------------------
+
+def test_stdio_integration_initialize_and_tools_list():
+    """Send initialize + tools/list through the actual server process and verify responses."""
+    init_msg = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test"}}
+    })
+    initialized_msg = json.dumps({
+        "jsonrpc": "2.0", "method": "notifications/initialized"
+    })
+    tools_msg = json.dumps({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+    })
+    stdin_data = (init_msg + "\n" + initialized_msg + "\n" + tools_msg + "\n").encode("utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "godotlens_mcp"],
+        input=stdin_data,
+        capture_output=True,
+        timeout=10,
+    )
+
+    stdout = result.stdout.decode("utf-8").strip()
+    lines = [line for line in stdout.split("\n") if line.strip()]
+    assert len(lines) == 2, f"Expected 2 responses, got {len(lines)}: {lines}"
+
+    init_response = json.loads(lines[0])
+    assert init_response["id"] == 1
+    assert init_response["result"]["serverInfo"]["name"] == "godotlens-mcp"
+    assert "tools" in init_response["result"]["capabilities"]
+
+    tools_response = json.loads(lines[1])
+    assert tools_response["id"] == 2
+    assert len(tools_response["result"]["tools"]) == 15
