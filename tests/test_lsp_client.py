@@ -2,12 +2,15 @@
 
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from godotlens_mcp.lsp_client import (
     LSPClient,
+    UnsupportedPathError,
+    canonical_key,
     compact_location,
     compact_symbol,
     file_uri,
@@ -18,16 +21,62 @@ from godotlens_mcp.lsp_client import (
 # file_uri
 # ---------------------------------------------------------------------------
 
+WINDOWS = os.name == "nt"
+
+
+@pytest.mark.skipif(WINDOWS, reason="POSIX absolute paths are drive-relative on Windows")
 def test_file_uri_unix_path():
     assert file_uri("/home/user/main.gd") == "file:///home/user/main.gd"
 
 
+@pytest.mark.skipif(not WINDOWS, reason="Windows drive paths")
 def test_file_uri_windows_path():
     assert file_uri("C:\\Users\\pzalu\\main.gd") == "file:///C:/Users/pzalu/main.gd"
 
 
+@pytest.mark.skipif(not WINDOWS, reason="Windows drive paths")
 def test_file_uri_forward_slash_windows():
     assert file_uri("C:/Users/pzalu/main.gd") == "file:///C:/Users/pzalu/main.gd"
+
+
+def test_file_uri_resolves_relative_paths(tmp_path, monkeypatch):
+    """Relative paths must resolve against cwd, not the filesystem root.
+
+    Regression: file_uri("scripts/player.gd") returned "file:///scripts/player.gd",
+    which pointed at the root of the filesystem on every platform, even though every
+    tool schema advertises relative paths as supported.
+    """
+    monkeypatch.chdir(tmp_path)
+    uri = file_uri("scripts/player.gd")
+    assert uri != "file:///scripts/player.gd"
+    assert uri.endswith("/scripts/player.gd")
+    assert uri_to_path(uri) == canonical_path_str(tmp_path / "scripts" / "player.gd")
+
+
+def test_file_uri_rejects_res_scheme():
+    """Godot 4.5+ hard-rejects non-file schemes, so fail loudly rather than mangle."""
+    with pytest.raises(UnsupportedPathError, match="res://"):
+        file_uri("res://scripts/player.gd")
+
+
+@pytest.mark.parametrize("name", [
+    "plain.gd",
+    "with space.gd",
+    "with#hash.gd",
+    "with(parens).gd",
+    "ünïcode.gd",
+    "with%percent.gd",
+])
+def test_file_uri_round_trip(tmp_path, name):
+    """path -> file_uri -> uri_to_path must return the original path on any platform."""
+    target = tmp_path / "sub dir" / name
+    original = canonical_path_str(target)
+    assert uri_to_path(file_uri(original)) == original
+
+
+def canonical_path_str(path) -> str:
+    """Forward-slash absolute form, matching what uri_to_path returns."""
+    return os.path.abspath(str(path)).replace("\\", "/")
 
 
 # ---------------------------------------------------------------------------
@@ -162,18 +211,24 @@ async def test_request_raises_on_error(client):
 
 @pytest.mark.asyncio
 async def test_diagnostics_cached_from_notifications(client):
-    """Verify that publishDiagnostics notifications populate the cache."""
+    """publishDiagnostics notifications populate the cache under a canonical key.
+
+    Regression test for the Godot 4.5+ percent-encoding bug: Godot publishes
+    ``file:///C%3A/...`` while file_uri() builds ``file:///C:/...``. Keying the cache
+    on the raw URI string meant the lookup never matched and every diagnostic was
+    silently dropped, so sync/diagnostics reported clean on broken code.
+    """
     client.writer = MagicMock()
     client.writer.write = MagicMock()
     client.writer.drain = AsyncMock()
     client.writer.is_closing = MagicMock(return_value=False)
 
-    # Feed a notification followed by a real response
+    # Exactly the encoding Godot 4.5+ emits on Windows.
     notification = {
         "jsonrpc": "2.0",
         "method": "textDocument/publishDiagnostics",
         "params": {
-            "uri": "file:///test.gd",
+            "uri": "file:///C%3A/My%20Project/test.gd",
             "diagnostics": [{"range": {"start": {"line": 1}}, "message": "error", "severity": 1}],
         },
     }
@@ -185,8 +240,29 @@ async def test_diagnostics_cached_from_notifications(client):
 
     await client.request("textDocument/definition", {})
 
-    assert "file:///test.gd" in client.diagnostics_cache
-    assert len(client.diagnostics_cache["file:///test.gd"]) == 1
+    # The unencoded path a caller would pass must find the encoded publication.
+    key = canonical_key("C:/My Project/test.gd")
+    assert key in client.diagnostics_cache
+    assert len(client.diagnostics_cache[key]) == 1
+
+
+@pytest.mark.parametrize(
+    "published,requested",
+    [
+        # Godot 4.5+ percent-encodes the drive colon; we build it plain.
+        ("file:///C%3A/proj/main.gd", "C:/proj/main.gd"),
+        ("file:///C%3A/My%20Project/main.gd", "C:/My Project/main.gd"),
+        ("file:///C%3A/pr%C3%B3j/main.gd", "C:/prój/main.gd"),
+        # POSIX publications must match a POSIX path.
+        ("file:///home/user/proj/main.gd", "/home/user/proj/main.gd"),
+        ("file:///home/user/My%20Proj/main.gd", "/home/user/My Proj/main.gd"),
+        # Redundant separators and dot segments normalize away.
+        ("file:///C%3A/proj/./sub/../main.gd", "C:/proj/main.gd"),
+    ],
+)
+def test_canonical_key_matches_published_and_requested(published, requested):
+    """A URI Godot publishes and the path a caller passes must key identically."""
+    assert canonical_key(published) == canonical_key(requested)
 
 
 @pytest.mark.asyncio

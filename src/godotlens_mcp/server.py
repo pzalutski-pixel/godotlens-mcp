@@ -9,6 +9,11 @@ from typing import Any
 from godotlens_mcp import __version__
 from godotlens_mcp.lsp_client import (
     LSPClient,
+    LSPConnectionLost,
+    LSPError,
+    LSPTimeout,
+    UnsupportedPathError,
+    canonical_key,
     compact_location,
     compact_symbol,
     file_uri,
@@ -16,21 +21,74 @@ from godotlens_mcp.lsp_client import (
 
 _lsp: LSPClient | None = None
 
+# MCP revisions this server implements, newest first. The client's requested version
+# is honoured when we support it; otherwise we answer with our latest, per the spec.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
+
+SERVER_INSTRUCTIONS = (
+    "GodotLens exposes Godot's own language server, so answers reflect how Godot "
+    "compiles the project rather than a text search.\n"
+    "- All line and character parameters are ZERO-BASED (editor line 1 = line 0).\n"
+    "- Godot's LSP does not watch the filesystem. After editing a .gd file, call "
+    "gdscript_sync_file or gdscript_sync_files before relying on any other result.\n"
+    "- Godot must be running with the project open. Check gdscript_status first.\n"
+    "- Godot's reference search reads .gd files only; it cannot see method names "
+    "referenced from .tscn scene files, so renaming a signal handler may leave a "
+    "scene connection pointing at the old name."
+)
+
+
+def log(message: str) -> None:
+    """Write a diagnostic line to stderr.
+
+    stdout carries the MCP stream exclusively; the stdio transport spec forbids
+    writing anything else there, but explicitly permits stderr for logging.
+    """
+    print(f"[godotlens] {message}", file=sys.stderr, flush=True)
+
 
 # ---------------------------------------------------------------------------
 # MCP protocol handler (JSON-RPC 2.0 over stdio, newline-delimited)
 # ---------------------------------------------------------------------------
 
-async def read_message() -> dict | None:
-    """Read a newline-delimited JSON-RPC message from stdin."""
+class ParseFailure:
+    """A stdin line that could not be turned into a JSON-RPC message."""
+
+    def __init__(self, code: int, message: str):
+        self.code = code
+        self.message = message
+
+
+async def read_message() -> dict | ParseFailure | None:
+    """Read one newline-delimited JSON-RPC message from stdin.
+
+    Returns None only at true EOF. A blank line is skipped rather than treated as EOF —
+    a single stray newline used to terminate the server and drop every later request.
+    Malformed input yields a ParseFailure so the caller can reply with a JSON-RPC error
+    instead of dying on an uncaught exception.
+    """
     loop = asyncio.get_event_loop()
-    line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
-    if not line:
-        return None  # EOF
-    line = line.strip()
-    if not line:
-        return None
-    return json.loads(line.decode("utf-8"))
+    while True:
+        line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+        if not line:
+            return None  # genuine EOF: the pipe is closed
+        stripped = line.strip()
+        if not stripped:
+            continue  # blank line between messages — keep reading
+
+        try:
+            payload = json.loads(stripped.decode("utf-8"))
+        except UnicodeDecodeError:
+            return ParseFailure(-32700, "Parse error: stdin was not valid UTF-8")
+        except json.JSONDecodeError as exc:
+            return ParseFailure(-32700, f"Parse error: {exc}")
+
+        if not isinstance(payload, dict):
+            # JSON-RPC batching was removed in MCP 2025-06-18, so an array is invalid.
+            kind = "array (JSON-RPC batching is not supported)" if isinstance(payload, list) else type(payload).__name__
+            return ParseFailure(-32600, f"Invalid Request: expected a JSON object, got {kind}")
+        return payload
 
 
 def write_message(data: dict) -> None:
@@ -471,7 +529,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             except asyncio.TimeoutError:
                 pass
 
-            diags = _lsp.diagnostics_cache.get(uri, [])
+            diags = _lsp.diagnostics_cache.get(canonical_key(file_path), [])
             result = {
                 "synced": file_path,
                 "diagnostics": [{
@@ -506,8 +564,8 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 pass
 
             results = {}
-            for file_path, uri in synced_uris:
-                diags = _lsp.diagnostics_cache.get(uri, [])
+            for file_path, _uri in synced_uris:
+                diags = _lsp.diagnostics_cache.get(canonical_key(file_path), [])
                 results[file_path] = [{
                     "line": d.get("range", {}).get("start", {}).get("line", 0),
                     "severity": d.get("severity", 1),
@@ -594,8 +652,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
 
             for file_path in arguments["files"]:
                 if file_path not in results:
-                    uri = file_uri(file_path)
-                    diags = _lsp.diagnostics_cache.get(uri, [])
+                    diags = _lsp.diagnostics_cache.get(canonical_key(file_path), [])
                     results[file_path] = [{
                         "line": d.get("range", {}).get("start", {}).get("line", 0),
                         "severity": d.get("severity", 1),
@@ -606,18 +663,46 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
         else:
             return tool_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
 
-        text = json.dumps(result, indent=2) if result else "No results"
-        return tool_result(text)
+        # Always serialize, even for empty results. Previously an empty list, empty
+        # dict, 0 and False all rendered as the string "No results", which an agent
+        # could not distinguish from a failed call — "zero references" and "your
+        # coordinates were wrong" are very different facts.
+        return tool_result(json.dumps(result if result is not None else None))
 
-    except Exception as e:
+    except UnsupportedPathError as e:
+        return tool_result(json.dumps({"error": str(e), "kind": "unsupported_path"}), is_error=True)
+
+    except (LSPConnectionLost, LSPTimeout) as e:
+        # Genuine transport failure — drop the socket so the next call reconnects.
         await _lsp.disconnect()
         return tool_result(
             json.dumps({
                 "error": str(e),
-                "hint": "LSP connection may have been lost. Try gdscript_status to reconnect.",
+                "kind": "connection_lost",
+                "hint": "Connection to Godot was lost. Call gdscript_status to reconnect.",
             }),
             is_error=True,
         )
+
+    except LSPError as e:
+        # The LSP answered with an error. The connection is fine — keep it. Tearing it
+        # down here used to force a full re-initialize after any protocol-level error.
+        return tool_result(
+            json.dumps({
+                "error": str(e),
+                "kind": "unsupported_method" if e.is_method_not_found else "lsp_error",
+                "code": e.code,
+            }),
+            is_error=True,
+        )
+
+    except OSError as e:
+        # File read failures in the sync/diagnostics tools. Not a transport problem.
+        return tool_result(json.dumps({"error": str(e), "kind": "file_error"}), is_error=True)
+
+    except Exception as e:  # noqa: BLE001 - surface, don't kill the connection
+        log(f"tool {name} failed: {e!r}")
+        return tool_result(json.dumps({"error": str(e), "kind": "internal_error"}), is_error=True)
 
 
 # ---------------------------------------------------------------------------
@@ -635,8 +720,13 @@ async def handle_request(msg: dict) -> dict | None:
         return None
 
     if method == "initialize":
+        requested = params.get("protocolVersion")
+        # Spec: echo the requested version when supported, otherwise reply with ours.
+        negotiated = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
+        if requested and requested != negotiated:
+            log(f"client requested unsupported protocol {requested}; offering {negotiated}")
         return jsonrpc_response(req_id, {
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": negotiated,
             "capabilities": {
                 "tools": {},
             },
@@ -644,6 +734,7 @@ async def handle_request(msg: dict) -> dict | None:
                 "name": "godotlens-mcp",
                 "version": __version__,
             },
+            "instructions": SERVER_INSTRUCTIONS,
         })
 
     elif method == "ping":
@@ -678,8 +769,15 @@ async def main():
         while True:
             msg = await read_message()
             if msg is None:
-                break
-            response = await handle_request(msg)
+                break  # EOF — the client closed stdin
+            if isinstance(msg, ParseFailure):
+                write_message(jsonrpc_error(None, msg.code, msg.message))
+                continue  # a bad line must not end the session
+            try:
+                response = await handle_request(msg)
+            except Exception as exc:  # noqa: BLE001 - the loop must outlive any handler
+                log(f"unhandled error in {msg.get('method', '?')}: {exc!r}")
+                response = jsonrpc_error(msg.get("id"), -32603, f"Internal error: {exc}")
             if response is not None:
                 write_message(response)
     finally:
