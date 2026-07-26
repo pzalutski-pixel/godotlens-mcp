@@ -36,16 +36,28 @@ Issues = "https://github.com/pzalutski-pixel/godotlens-mcp/issues"
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.3.0",
+    "pytest-cov>=5.0.0",
     "ruff>=0.7.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# No test should ever hang the suite; transport tests talk to real sockets.
+timeout = 120
+markers = [
+    "integration: requires a real Godot binary (skipped when none is found)",
+]
 
 [tool.ruff]
 target-version = "py310"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+# ASYNC matters most here: this is an asyncio codebase where a blocking call or an
+# un-awaited coroutine is a real bug class. B/UP/RUF catch the rest.
+select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

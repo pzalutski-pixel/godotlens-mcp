@@ -26,6 +26,10 @@ _lsp: LSPClient | None = None
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 
+# How long to wait for Godot to publish diagnostics after a sync. A cold project or a
+# busy editor can take seconds; the previous fixed 0.3s sleep silently reported clean.
+DIAGNOSTICS_TIMEOUT = float(os.environ.get("GODOT_DIAGNOSTICS_TIMEOUT", "8.0"))
+
 SERVER_INSTRUCTIONS = (
     "GodotLens exposes Godot's own language server, so answers reflect how Godot "
     "compiles the project rather than a text search.\n"
@@ -427,6 +431,28 @@ async def ensure_connected() -> tuple[bool, str]:
     return await _lsp.connect()
 
 
+async def read_text_file(path: str) -> str:
+    """Read a UTF-8 file without blocking the event loop.
+
+    Reading inline stalls every other in-flight coroutine, which matters most on the
+    batch tools where dozens of files are read in one call.
+    """
+    def _read() -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    return await asyncio.get_event_loop().run_in_executor(None, _read)
+
+
+def _compact_diagnostics(diagnostics: list) -> list:
+    """Reduce LSP diagnostics to line/severity/message."""
+    return [{
+        "line": d.get("range", {}).get("start", {}).get("line", 0),
+        "severity": d.get("severity", 1),
+        "message": d.get("message", ""),
+    } for d in diagnostics]
+
+
 def _compact_locations(result: Any) -> list:
     """Normalize an LSP location result (single or list) to compacted list."""
     items = result if isinstance(result, list) else [result]
@@ -513,8 +539,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             file_path = arguments["file"]
             content = arguments.get("content")
             if content is None:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
+                content = await read_text_file(file_path)
             uri = file_uri(file_path)
             await _lsp.notify("textDocument/didOpen", {
                 "textDocument": {"uri": uri, "languageId": "gdscript", "version": 1, "text": content}
@@ -523,29 +548,29 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 "textDocument": {"uri": uri}, "text": content
             })
 
-            await asyncio.sleep(0.3)
-            try:
-                await asyncio.wait_for(_lsp.drain_notifications(), timeout=0.5)
-            except asyncio.TimeoutError:
-                pass
+            key = canonical_key(file_path)
+            missing = await _lsp.wait_for_diagnostics([key], timeout=DIAGNOSTICS_TIMEOUT)
 
-            diags = _lsp.diagnostics_cache.get(canonical_key(file_path), [])
             result = {
                 "synced": file_path,
-                "diagnostics": [{
-                    "line": d.get("range", {}).get("start", {}).get("line", 0),
-                    "severity": d.get("severity", 1),
-                    "message": d.get("message", "")
-                } for d in diags]
+                "diagnostics": _compact_diagnostics(_lsp.diagnostics_cache.get(key, [])),
+                # Distinguishes "Godot checked it and it is clean" from "Godot never
+                # reported back". Reporting the second as clean is how broken code
+                # used to get a passing verdict.
+                "verified": not missing,
             }
+            if missing:
+                result["warning"] = (
+                    f"Godot did not publish diagnostics within {DIAGNOSTICS_TIMEOUT}s; "
+                    "the file may still be parsing. Results are not a clean bill of health."
+                )
 
         elif name == "gdscript_sync_files":
             synced_uris = []
             errors = []
             for file_path in arguments["files"]:
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        content = f.read()
+                    content = await read_text_file(file_path)
                     uri = file_uri(file_path)
                     await _lsp.notify("textDocument/didOpen", {
                         "textDocument": {"uri": uri, "languageId": "gdscript", "version": 1, "text": content}
@@ -554,25 +579,25 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                         "textDocument": {"uri": uri}, "text": content
                     })
                     synced_uris.append((file_path, uri))
-                except Exception as e:
+                except (OSError, UnsupportedPathError) as e:
                     errors.append({"file": file_path, "error": str(e)})
 
-            await asyncio.sleep(0.3)
-            try:
-                await asyncio.wait_for(_lsp.drain_notifications(), timeout=0.5)
-            except asyncio.TimeoutError:
-                pass
+            keys = [canonical_key(fp) for fp, _ in synced_uris]
+            missing = await _lsp.wait_for_diagnostics(keys, timeout=DIAGNOSTICS_TIMEOUT)
 
             results = {}
             for file_path, _uri in synced_uris:
-                diags = _lsp.diagnostics_cache.get(canonical_key(file_path), [])
-                results[file_path] = [{
-                    "line": d.get("range", {}).get("start", {}).get("line", 0),
-                    "severity": d.get("severity", 1),
-                    "message": d.get("message", "")
-                } for d in diags]
+                results[file_path] = _compact_diagnostics(
+                    _lsp.diagnostics_cache.get(canonical_key(file_path), []))
 
-            result = {"synced": len(synced_uris), "diagnostics": results}
+            result = {
+                "synced": len(synced_uris),
+                "diagnostics": results,
+                "verified": not missing,
+            }
+            if missing:
+                result["unverified_files"] = [
+                    fp for fp, _ in synced_uris if canonical_key(fp) in missing]
             if errors:
                 result["errors"] = errors
 
@@ -635,30 +660,25 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             results = {}
             for file_path in arguments["files"]:
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        content = f.read()
+                    content = await read_text_file(file_path)
                     uri = file_uri(file_path)
                     await _lsp.notify("textDocument/didOpen", {
                         "textDocument": {"uri": uri, "languageId": "gdscript", "version": 1, "text": content}
                     })
-                except Exception as e:
+                except (OSError, UnsupportedPathError) as e:
                     results[file_path] = {"error": str(e)}
 
-            await asyncio.sleep(0.3)
-            try:
-                await asyncio.wait_for(_lsp.drain_notifications(), timeout=0.5)
-            except asyncio.TimeoutError:
-                pass
+            pending = [canonical_key(fp) for fp in arguments["files"] if fp not in results]
+            missing = await _lsp.wait_for_diagnostics(pending, timeout=DIAGNOSTICS_TIMEOUT)
 
             for file_path in arguments["files"]:
                 if file_path not in results:
-                    diags = _lsp.diagnostics_cache.get(canonical_key(file_path), [])
-                    results[file_path] = [{
-                        "line": d.get("range", {}).get("start", {}).get("line", 0),
-                        "severity": d.get("severity", 1),
-                        "message": d.get("message", "")
-                    } for d in diags]
-            result = results
+                    results[file_path] = _compact_diagnostics(
+                        _lsp.diagnostics_cache.get(canonical_key(file_path), []))
+            result = {"diagnostics": results, "verified": not missing}
+            if missing:
+                result["unverified_files"] = [
+                    fp for fp in arguments["files"] if canonical_key(fp) in missing]
 
         else:
             return tool_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
@@ -700,7 +720,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
         # File read failures in the sync/diagnostics tools. Not a transport problem.
         return tool_result(json.dumps({"error": str(e), "kind": "file_error"}), is_error=True)
 
-    except Exception as e:  # noqa: BLE001 - surface, don't kill the connection
+    except Exception as e:
         log(f"tool {name} failed: {e!r}")
         return tool_result(json.dumps({"error": str(e), "kind": "internal_error"}), is_error=True)
 
@@ -775,7 +795,7 @@ async def main():
                 continue  # a bad line must not end the session
             try:
                 response = await handle_request(msg)
-            except Exception as exc:  # noqa: BLE001 - the loop must outlive any handler
+            except Exception as exc:
                 log(f"unhandled error in {msg.get('method', '?')}: {exc!r}")
                 response = jsonrpc_error(msg.get("id"), -32603, f"Internal error: {exc}")
             if response is not None:

@@ -156,7 +156,7 @@ def test_compact_symbol_location_fallback():
 def _make_lsp_message(data: dict) -> bytes:
     """Encode a dict as a Content-Length framed LSP message."""
     body = json.dumps(data).encode("utf-8")
-    return f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8") + body
+    return f"Content-Length: {len(body)}\r\n\r\n".encode() + body
 
 
 @pytest.fixture

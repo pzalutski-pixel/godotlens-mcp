@@ -252,6 +252,22 @@ class LSPClient:
             "error": {"code": -32601, "message": f"Method not found: {method}"},
         })
 
+    async def wait_for_diagnostics(self, keys: list[str], timeout: float = 5.0) -> set[str]:
+        """Drain until every key has a published diagnostics entry, or time runs out.
+
+        Returns the keys still missing. Godot publishes an entry for every file it
+        parses — an *empty list* means "checked, clean", whereas *no entry* means we
+        never heard back. A fixed sleep conflated the two and reported clean on files
+        Godot had not finished parsing.
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        pending = {k for k in keys if k not in self.diagnostics_cache}
+        while pending and loop.time() < deadline:
+            await self.drain_notifications(0.15)
+            pending = {k for k in keys if k not in self.diagnostics_cache}
+        return pending
+
     async def drain_notifications(self, window: float = 0.1):
         """Consume pending server->client traffic until the stream goes quiet."""
         if self._lock.locked():
@@ -297,8 +313,14 @@ def canonical_key(uri_or_path: str) -> str:
             # UNC: file://server/share/x -> //server/share/x
             text = f"//{parts.netloc}{text}"
     else:
-        text = unquote(text)
-    return os.path.normcase(os.path.normpath(text))
+        text = os.path.expanduser(unquote(text))
+    # Absolutize BOTH branches, symmetrically. Callers legitimately pass relative paths
+    # (the tool schemas advertise them) while Godot always publishes absolute URIs;
+    # comparing "broken.gd" against "C:/proj/broken.gd" silently never matched, so a
+    # relative path yielded an empty diagnostics list — a false clean bill of health.
+    # Applying abspath to only one side reintroduces the same mismatch on Windows,
+    # where a POSIX-style path is drive-relative.
+    return os.path.normcase(os.path.abspath(text))
 
 
 class UnsupportedPathError(ValueError):
