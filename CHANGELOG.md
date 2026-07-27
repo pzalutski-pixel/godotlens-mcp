@@ -56,57 +56,63 @@ editor, not inferred. Several of these were returning confident wrong answers.
 
 ### Added
 
-- `gdscript_engine_api` — authoritative signatures and documentation for any engine
-  class or member, from the exact editor build in use. Backed by the 1,076-class
-  list Godot pushes on connect, which was previously discarded.
-- `gdscript_complete` — the only scene-aware query available: Godot resolves the
-  scene owning the script and completes against the real node, so `$NodePath`
-  entries and the node's actual signals are included.
-- `gdscript_validate` — check proposed content and get diagnostics **without
-  writing to disk**.
+Three new capability groups, each a different way of asking Godot rather than guessing.
+
+**Runtime** — the debugger, via Godot's Debug Adapter Protocol on port 6006, served by the
+editor with no addon required. The language server says whether code compiles; only the
+debugger says what the code *did*.
+
+- `debug_run` — run the project and return what it printed. One implementation note worth
+  recording: Godot withholds the `launch` response until `configurationDone` arrives, so
+  sending `configurationDone` first — the natural reading of the DAP setup sequence —
+  deadlocks and is indistinguishable from launch being unsupported. With the correct order it
+  works, **including headless**, so it is usable in CI as well as beside an open editor.
+- `debug_output`, `debug_set_breakpoints`, `debug_stack_trace`, `debug_inspect`,
+  `debug_evaluate`, `debug_continue`, `debug_pause`, `debug_step_over`, `debug_terminate`,
+  `debug_status`.
+
+**Project and scenes** — obtained by running the engine, never by parsing the file format, so
+inherited scenes and setting overrides resolve exactly as Godot resolves them.
+
+- `scene_state` and `scene_validate`. Godot's reference search reads `.gd` files only, so
+  renaming a signal handler silently leaves `[connection method="..."]` pointing at a method
+  that no longer exists, failing at runtime with no compile error anywhere.
+  `gdscript_rename` now warns when a name also appears in scene files.
+- `project_config` — autoloads, input actions, `class_name` globals and the main scene.
+  These names are bare strings at the point of use and nothing validates them: a typo in
+  `Input.is_action_pressed("jmup")` is a silent runtime no-op that neither the compiler nor
+  the language server nor scene validation catches.
+
+**Language server capabilities that were already available and unused.**
+
+- `gdscript_find` — locate a declaration **by name**, returning a position the other tools
+  accept directly. Every navigation tool takes `(file, line, character)`, so an agent that
+  knows a name has to read the file and count columns; landing one column off returns an empty
+  result indistinguishable from "no such symbol", which sends it back to `grep`. Positions come
+  from `documentSymbol`'s `selectionRange`, so they are the language server's answer rather
+  than a text match.
+- `gdscript_engine_api` — authoritative signatures and documentation for any engine class or
+  member, from the exact editor build in use. Backed by the 1,076-class list Godot pushes on
+  connect, which was previously received and discarded.
+- `gdscript_complete` — the only scene-aware query available: Godot resolves the scene owning
+  the script and completes against the real node, so `$NodePath` entries and the node's actual
+  signals are included.
+- `gdscript_validate` — check proposed content and get diagnostics **without writing to disk**.
 - `gdscript_references_in_file` — `documentHighlight` on Godot 4.7+, avoiding the
   whole-project reparse that `references` triggers on 4.6+.
-- `gdscript_find` — locate a declaration **by name**, returning a position the other
-  tools can use directly. Every navigation tool takes `(file, line, character)`, so an
-  agent that knows a name has to read the file and count columns; landing one column
-  off returns an empty result indistinguishable from "no such symbol", which sends it
-  back to `grep` and forfeits the point of the tool. Positions come from
-  `documentSymbol`'s `selectionRange`, so they are the language server's answer rather
-  than a text match.
-- `project_config` — autoloads, input actions, `class_name` globals and the main scene,
-  read from `ProjectSettings` via the engine. Autoload and input action names are bare
-  strings at the point of use and nothing in the toolchain validates them: a typo in
-  `Input.is_action_pressed("jmup")` is a silent runtime no-op that neither the compiler
-  nor the language server nor scene validation catches.
-- **Runtime inspection via Godot's Debug Adapter Protocol** (`debug_*`, 10 tools).
-  Godot serves DAP from the editor on port 6006 with no addon, so this keeps the
-  zero-install property the LSP bridge already had. It closes the one part of the
-  edit-verify loop the language server cannot reach: the LSP says whether code
-  compiles, the debugger says what it did — printed output, runtime errors with a
-  stack trace, and variable values at a breakpoint. Verified on 4.7.1.
-- `debug_run` — run the project and return what it printed. The handshake order is
-  load-bearing and easy to get wrong: Godot withholds the `launch` response until
-  `configurationDone` arrives, so sending `configurationDone` first — the natural
-  reading of the DAP setup sequence — deadlocks and looks exactly like "launch is
-  unsupported". With the correct order it works, **including headless**, so this is
-  usable in CI and not only beside an open editor.
-- `scene_state` and `scene_validate` — Godot's own resolved view of a `.tscn`
-  (node tree, script attachments, signal connections), obtained by running the
-  engine rather than parsing the format. Godot's reference search reads `.gd` files
-  only, so renaming a signal handler silently leaves `[connection method="..."]`
-  pointing at a method that no longer exists, failing at runtime with no compile
-  error. `gdscript_rename` now warns when a name also appears in scene files.
-- Capability detection: what the server *does*, not its version number. Godot
-  returns no `serverInfo`, and Godot ≤4.4 advertises `workspaceSymbolProvider: true`
-  for a method that has never existed, so advertised positives are never trusted
-  alone.
+
+**Correctness and protocol infrastructure.**
+
+- Capability detection: what the server *does*, not its version number. Godot returns no
+  `serverInfo`, and Godot ≤4.4 advertises `workspaceSymbolProvider: true` for a method that has
+  never existed, so advertised positives are never trusted alone.
 - MCP tool annotations on every tool. The schema defaults `destructiveHint` and
-  `openWorldHint` to *true*, so silence meant clients had to assume `gdscript_hover`
-  might destroy something.
+  `openWorldHint` to *true*, so silence meant clients had to assume `gdscript_hover` might
+  destroy something.
 - `instructions` in the initialize result, and stderr logging.
-- CI on every push and PR across {Linux, Windows, macOS} × Python 3.10–3.13, plus
-  integration tests against a real headless Godot on all three platforms, and a job
-  that installs the built npm tarball and runs it.
+- CI on every push and PR across {Linux, Windows, macOS} × Python 3.10–3.13, integration tests
+  against a real headless Godot on all three platforms, and a job that installs the built npm
+  tarball and executes it.
 
 ### Changed
 
@@ -115,6 +121,13 @@ editor, not inferred. Several of these were returning confident wrong answers.
   agent could not distinguish from a failed call.
 - Minimum supported Godot is **4.6**, where the LSP's behaviour stabilises.
 - Versions are single-sourced from `__init__.py`.
+
+### Changed — licensing
+
+- **Relicensed from MIT to Apache License 2.0.** Apache 2.0 adds an explicit patent grant and
+  requires downstream users to state their changes; both matter more as the tool surface grows.
+  The project has a single author across its entire history, so no third-party consent was
+  needed. A `NOTICE` file now ships with both distributions, per section 4(d).
 
 ### Removed
 

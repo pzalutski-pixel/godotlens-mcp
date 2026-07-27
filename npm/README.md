@@ -2,14 +2,29 @@
 
 [![npm](https://img.shields.io/npm/v/godotlens-mcp.svg)](https://www.npmjs.com/package/godotlens-mcp)
 [![PyPI](https://img.shields.io/pypi/v/godotlens-mcp.svg)](https://pypi.org/project/godotlens-mcp/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/pzalutski-pixel/godotlens-mcp/blob/main/LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/pzalutski-pixel/godotlens-mcp/blob/main/LICENSE)
 
-An MCP server providing **15 AI-optimized tools** for GDScript semantic code analysis, powered by Godot's built-in Language Server.
+An MCP server that gives AI agents **Godot's own view** of a GDScript project — navigation,
+diagnostics, engine API, scene verification, and runtime output — by bridging the language
+server and debug adapter the Godot editor already runs.
 
 ## Requirements
 
-- **Godot 4.x** editor running with your project open (the LSP server starts automatically)
-- **Python 3.10+** installed and on PATH
+| | Needed for |
+|---|---|
+| **Godot 4.6+**, editor open on your project | everything (the LSP and debug adapter live in the editor) |
+| **Python 3.10+** on PATH | this npm wrapper spawns the bundled server |
+| A Godot **binary** via `GODOT_BIN`, `./godot/`, or PATH | `scene_*` and `project_config`, which run the engine to resolve scenes and settings |
+
+Godot 4.6 is the floor because the language server's behaviour changed materially at 4.5
+(URI encoding) and 4.6 (document ownership). Older versions are refused with a clear
+message rather than silently misread.
+
+The editor does not need a visible window:
+
+```bash
+godot --path <project> --editor --headless --lsp-port 6005 --dap-port 6006
+```
 
 ## Quick Start
 
@@ -24,41 +39,58 @@ An MCP server providing **15 AI-optimized tools** for GDScript semantic code ana
 }
 ```
 
-## What This Package Does
+## What this package does
 
-This npm package bundles the full GodotLens server (~20 KB of Python). No pip install, no network dependency after install. It:
+Bundles the full server (pure Python, **zero runtime dependencies**), checks for Python 3.10+,
+and launches it over stdio. No pip install, no network access after install.
 
-1. Checks that Python 3.10+ is installed
-2. Launches the bundled MCP server with stdio for protocol communication
+## Why
 
-Zero external Python dependencies — the server uses only the Python standard library.
+An agent working from text alone cannot tell a call from a comment, cannot know which methods
+exist on a `CharacterBody2D` in *your* Godot version, and cannot see that a signal handler is
+wired by name inside a `.tscn`. Every answer here comes from the engine.
 
-## Why GodotLens?
-
-AI coding agents work with text files but lack semantic understanding of GDScript. GodotLens bridges this gap by exposing Godot's built-in LSP through the Model Context Protocol.
-
-| Without GodotLens | With GodotLens |
+| Without | With |
 |---|---|
-| `grep "func _ready"` finds text matches including comments | `gdscript_definition` returns the exact definition |
-| No way to find all callers of a function | `gdscript_references` returns every call site |
-| Manual file reading to understand class structure | `gdscript_symbols` returns the full symbol tree |
-| No error checking until Godot runs | `gdscript_diagnostics` returns compiler errors in real-time |
+| `grep take_damage` — matches comments and strings | `gdscript_references` — the actual call sites |
+| Guess a coordinate, land one column off, get nothing | `gdscript_find` — look a symbol up by name |
+| Recall Godot's API from memory | `gdscript_engine_api` — signatures from *your* build |
+| Rename a signal handler, break the scene silently | `gdscript_rename` warns; `scene_validate` catches it |
+| Paste console output back by hand | `debug_run` — run it and read what it printed |
 
-## Features
+## Tools
 
-- **Navigation**: go to definition, declaration, references, hover info, document symbols, signature help
-- **Refactoring**: rename symbol across all files
-- **Synchronization**: notify LSP of file changes, deletions
-- **Batch operations**: symbols, definitions, and references across multiple files
-- **Diagnostics**: errors and warnings from Godot's compiler
+33 tools. Line and character parameters are **0-indexed** throughout.
+
+- **Navigation** — `gdscript_find` (by name), `gdscript_definition`, `gdscript_references`,
+  `gdscript_references_in_file`, `gdscript_hover`, `gdscript_symbols`, `gdscript_signature_help`
+- **Authoring** — `gdscript_engine_api`, `gdscript_complete` (scene-aware), `gdscript_validate`
+  (check content before writing it to disk)
+- **Refactoring** — `gdscript_rename`
+- **Project & scenes** — `project_config`, `scene_state`, `scene_validate`
+- **Runtime** — `debug_run`, `debug_output`, `debug_set_breakpoints`, `debug_stack_trace`,
+  `debug_inspect`, `debug_evaluate`, plus execution control
+- **Sync & diagnostics** — `gdscript_sync_file`, `gdscript_sync_files`, `gdscript_diagnostics`,
+  `gdscript_release_file`, batch variants
+
+Godot's LSP does not watch the filesystem, so call `gdscript_sync_file` after editing a `.gd`
+file. Results carry a `verified` flag: an empty diagnostics list with `verified: false` means
+Godot never reported back — **not** that the file is clean.
 
 ## Configuration
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `GODOT_LSP_HOST` | `127.0.0.1` | Godot LSP server host |
-| `GODOT_LSP_PORT` | `6005` | Godot LSP server port |
+| Variable | Default | Description |
+|---|---|---|
+| `GODOT_LSP_HOST` | `127.0.0.1` | Language server host |
+| `GODOT_LSP_PORT` | `6005` | Language server port (the official VS Code extension uses `6008`) |
+| `GODOT_DAP_HOST` | `127.0.0.1` | Debug adapter host |
+| `GODOT_DAP_PORT` | `6006` | Debug adapter port, used by `debug_*` |
+| `GODOT_BIN` | auto | Godot executable, required by `scene_*` and `project_config` |
+| `GODOT_PROJECT_ROOT` | auto | Project root; auto-detected by walking up for `project.godot` |
+| `GODOT_LSP_TIMEOUT` | `15` | Seconds to wait for any single LSP response |
+| `GODOT_DIAGNOSTICS_TIMEOUT` | `8` | Seconds to wait for diagnostics after a sync |
+| `GODOT_VERSION` | auto | Override capability detection |
 
 ## Documentation
 
-Full documentation and tool reference: [GitHub](https://github.com/pzalutski-pixel/godotlens-mcp)
+Full tool reference and rationale: [GitHub](https://github.com/pzalutski-pixel/godotlens-mcp)

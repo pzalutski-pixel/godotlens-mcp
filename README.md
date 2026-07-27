@@ -1,53 +1,54 @@
-# GodotLens: AI-First Code Analysis for GDScript
+# GodotLens: Godot's own view of your GDScript project
 
 [![GitHub Release](https://img.shields.io/github/v/release/pzalutski-pixel/godotlens-mcp)](https://github.com/pzalutski-pixel/godotlens-mcp/releases)
 [![npm](https://img.shields.io/npm/v/godotlens-mcp)](https://www.npmjs.com/package/godotlens-mcp)
 [![PyPI](https://img.shields.io/pypi/v/godotlens-mcp)](https://pypi.org/project/godotlens-mcp/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-An MCP server that gives AI agents Godot's own view of a GDScript project — navigation,
-diagnostics, engine API, and scene verification — powered by Godot's built-in Language Server.
+An MCP server that lets an AI agent ask **Godot itself** about your project — where a symbol
+is used, what a method's real signature is, whether an edit compiles, how a scene is wired,
+and what the game actually printed when it ran.
 
-## Built for AI Agents
+## Why
 
-AI coding agents work with text files but lack semantic understanding of GDScript. When an agent uses `grep` to find usages of a function, it cannot distinguish a function call from a comment containing the same name, a signal declaration from a signal emission, or an overridden method from an unrelated function.
+An agent editing GDScript from text alone is guessing. It cannot tell a call from a comment,
+cannot know which methods exist on a `CharacterBody2D` in *your* Godot version, cannot see that
+a signal handler is wired by name inside a `.tscn`, and cannot see what happened at runtime.
 
-GodotLens bridges this gap by exposing Godot's built-in Language Server through the Model Context Protocol (MCP), giving AI agents compiler-accurate code intelligence for GDScript — go to definition, find references, diagnostics, rename, and more.
-
-**Example**, measured against Godot 4.7.1 on a project where `take_damage` is defined in
-`player.gd`, called twice from `enemy.gd`, once from `player.gd` itself, and mentioned in a
-comment:
+GodotLens never answers those questions itself. It asks the engine and returns the engine's
+answer. Measured on Godot 4.7.1, in a project where `take_damage` is defined in `player.gd`,
+called twice from `enemy.gd`, once from `player.gd`, and named in a comment:
 
 | Approach | Result |
 |----------|--------|
-| `grep "take_damage"` | 5 matches, including the comment |
-| `gdscript_references` | Exactly 4 real call sites; the comment is not among them |
+| `grep take_damage` | 5 matches, including the comment |
+| `gdscript_references` | exactly 4 real call sites; the comment is not among them |
 
-### What the LSP cannot see
+That principle — *delegate every judgement to Godot* — is what makes the answers trustworthy,
+and it is why the tool names tell you where an answer came from. `gdscript_*` is the language
+server. `scene_*` and `project_config` run the engine. `debug_*` is the debugger.
 
-Godot's reference search reads `.gd` files only. A signal handler wired in a `.tscn`
-`[connection]` block is invisible to it, so renaming that handler leaves the scene pointing at a
-method that no longer exists — and that fails at runtime with no compile error anywhere. This is
-why `scene_state` and `scene_validate` exist, and why `gdscript_rename` warns when a name also
-appears in scene files.
+## Requirements
 
-## Prerequisites
+| | Needed for |
+|---|---|
+| **Godot 4.6+** with your project open | everything — the language server and debug adapter live inside the editor |
+| **Python 3.10+**, or **Node.js 16+** for `npx` | running this server |
+| A Godot **binary** via `GODOT_BIN`, a `./godot/` directory, or `PATH` | `scene_*` and `project_config`, which invoke the engine |
 
-- **Godot 4.6+** running with your project open — the LSP starts automatically when the editor
-  opens a project. Older 4.x releases are refused rather than silently misread: behaviour changed
-  materially at 4.5 (URI encoding) and 4.6 (document ownership).
-- **Python 3.10+** (for pip install) or **Node.js 16+** (for npx)
-- A Godot **binary** for the `scene_*` tools, which run the engine to resolve scenes. Found via
-  `GODOT_BIN`, a `./godot/` directory, or `PATH`.
+Godot 4.6 is the floor because the language server changed materially at 4.5 (URI encoding)
+and 4.6 (document ownership). Older versions are refused with a clear message rather than
+silently misread.
 
-> The editor does not need a window. `godot --path <project> --editor --headless --lsp-port 6005`
-> serves the LSP with no GUI, which is what the integration tests use in CI.
+The editor does not need a visible window — this is what CI uses:
 
-## Quick Start
+```bash
+godot --path <project> --editor --headless --lsp-port 6005 --dap-port 6006
+```
 
-### Option A: npx (recommended for MCP clients)
+## Install
 
-Add to your MCP configuration (e.g., `.mcp.json` for Claude Code):
+**npx** (recommended). The package bundles the server; there are no runtime dependencies.
 
 ```json
 {
@@ -60,9 +61,7 @@ Add to your MCP configuration (e.g., `.mcp.json` for Claude Code):
 }
 ```
 
-The npm package bundles the full server (~20 KB of Python). Zero external Python dependencies.
-
-### Option B: pip
+**pip**
 
 ```bash
 pip install godotlens-mcp
@@ -71,169 +70,186 @@ pip install godotlens-mcp
 ```json
 {
   "mcpServers": {
-    "godotlens": {
-      "command": "godotlens-mcp"
-    }
+    "godotlens": { "command": "godotlens-mcp" }
   }
 }
 ```
 
-## Configuration
+## The loop
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `GODOT_LSP_HOST` | `127.0.0.1` | Godot LSP server host |
-| `GODOT_LSP_PORT` | `6005` | Godot LSP server port. The official VS Code extension defaults to `6008` |
-| `GODOT_LSP_TIMEOUT` | `15` | Seconds to wait for any single LSP response |
-| `GODOT_DIAGNOSTICS_TIMEOUT` | `8` | Seconds to wait for Godot to publish diagnostics after a sync |
-| `GODOT_PROJECT_ROOT` | auto | Project root. Auto-detected by walking up for `project.godot` |
-| `GODOT_BIN` | auto | Godot executable, required by the `scene_*` tools |
-| `GODOT_VERSION` | auto | Override capability detection |
-| `GODOT_DAP_HOST` | `127.0.0.1` | Godot debug adapter host |
-| `GODOT_DAP_PORT` | `6006` | Godot debug adapter port, used by the `debug_*` tools |
+The tools are designed around one cycle. Read it once and the rest of this document is a
+reference.
+
+```mermaid
+flowchart LR
+    U["<b>Understand</b><br/>gdscript_find<br/>gdscript_references<br/>gdscript_hover"]
+    W["<b>Write</b><br/>gdscript_engine_api<br/>gdscript_complete<br/>gdscript_validate"]
+    S["<b>Sync</b><br/>gdscript_sync_file"]
+    V["<b>Verify</b><br/>gdscript_diagnostics<br/>scene_validate"]
+    R["<b>Run</b><br/>debug_run<br/>debug_output"]
+
+    U --> W --> S --> V --> R
+    R -- "something is wrong" --> U
+
+    classDef step fill:#f5f7fa,stroke:#4a6785,stroke-width:1px,color:#1b2733;
+    class U,W,S,V,R step;
+```
+
+1. **Understand.** `gdscript_find` locates a symbol by name; `gdscript_references` and
+   `gdscript_hover` explain how it is used and what type it is.
+2. **Write.** `gdscript_engine_api` gives real signatures instead of recalled ones,
+   `gdscript_complete` offers scene-aware candidates, and `gdscript_validate` checks proposed
+   content *before* it reaches disk.
+3. **Sync.** Godot's language server does not watch the filesystem. After editing a `.gd`
+   file, call `gdscript_sync_file` or it keeps answering from the old text.
+4. **Verify.** `gdscript_diagnostics` for compile errors, `scene_validate` for the wiring the
+   compiler cannot see.
+5. **Run.** `debug_run` starts the game and returns what it printed.
+
+Two conventions apply throughout:
+
+- **All line and character parameters are 0-indexed**, matching the LSP. Editor line 1 is
+  line 0. `gdscript_find` exists partly so you rarely have to compute one by hand.
+- **Results carry a `verified` flag** where it matters. `verified: false` with an empty
+  diagnostics list means Godot never reported back — that is *not* a clean bill of health.
 
 ## Tools
 
-All line and character parameters are **0-indexed**, matching the LSP specification.
-
-### Health
+### Understanding code
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_status` | Check the connection to Godot. Use first if anything is behaving oddly. |
-
-### Navigation
-
-Start with `gdscript_find` when you know a name but not where it is — the position it
-returns feeds directly into every position-based tool below. Guessing a character
-offset and landing one column off returns an empty result that looks exactly like
-"no such symbol".
-
-| Tool | Description |
-|------|-------------|
-| `gdscript_find` | Locate a symbol's declaration **by name**. Returns file, line and character, resolved by the language server rather than by text matching. |
+| `gdscript_find` | Locate a declaration **by name**. Returns a position the tools below accept directly. |
 | `gdscript_definition` | Where a symbol is defined. |
-| `gdscript_references` | Every reference project-wide. On Godot 4.6+ this reparses every `.gd` file, so it is not cheap. |
-| `gdscript_references_in_file` | Occurrences within one file, via `documentHighlight`. Much cheaper. Godot 4.7+. |
+| `gdscript_references` | Every reference project-wide. On 4.6+ this reparses every `.gd` file, so it is not cheap. |
+| `gdscript_references_in_file` | Occurrences within one file. Much cheaper. Godot 4.7+. |
 | `gdscript_hover` | Type information and documentation for a symbol. |
 | `gdscript_symbols` | The symbol tree of a file. |
 | `gdscript_signature_help` | Parameter info at a call site. |
+| `gdscript_symbols_batch`, `gdscript_definitions_batch`, `gdscript_references_batch` | The same, across many files or positions in one call. |
 
-### Authoring
+### Writing code
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_engine_api` | Authoritative signatures and docs for an engine class or member, from the exact build in use. Use this instead of recalling Godot's API. |
-| `gdscript_complete` | Valid completions at a position. The only **scene-aware** query: includes real `$NodePath` entries and the signals actually on the owning node. |
+| `gdscript_engine_api` | Signatures and docs for an engine class or member, from the exact build in use. Use instead of recalling Godot's API. |
+| `gdscript_complete` | Completions at a position. The only **scene-aware** query: includes real `$NodePath` entries and the signals actually on the owning node. |
 | `gdscript_validate` | Check proposed content for errors **without writing it to disk**. |
-
-### Refactoring
-
-| Tool | Description |
-|------|-------------|
 | `gdscript_rename` | Rename a symbol. Refuses when Godot will not rename it, and warns when the name also appears in scene files it cannot update. |
 
-### Project
+### Keeping Godot in step
 
 | Tool | Description |
 |------|-------------|
-| `project_config` | Autoload singletons, input action names, `class_name` globals, and the main scene, resolved through `ProjectSettings`. |
+| `gdscript_sync_file` | Sync one modified file and return its diagnostics. |
+| `gdscript_sync_files` | Sync several at once. |
+| `gdscript_release_file` | Release a file so the language server reads from disk again. |
+| `gdscript_diagnostics` | Errors and warnings for one or more files. |
+| `gdscript_status` | Connection check. Start here if anything behaves oddly. |
 
-Autoload and input action names are bare strings where they are used —
-`GameState.add_score(1)`, `Input.is_action_pressed("jump")` — and **nothing validates
-them**. Not the compiler, not the language server, not scene validation. A typo is a
-silent runtime no-op, so check names here before writing them.
+### Project and scenes
 
-### Scenes
-
-These run the Godot binary to resolve a scene the way the engine does, including
-inherited scenes. They do not parse `.tscn` as text.
+These invoke the Godot binary so scenes resolve exactly as the engine builds them, inherited
+scenes included. They do not parse `.tscn` as text.
 
 | Tool | Description |
 |------|-------------|
+| `project_config` | Autoload singletons, input action names, `class_name` globals, and the main scene, via `ProjectSettings`. |
 | `scene_state` | Node tree, types, script attachments, `unique_name_in_owner` flags, exported values, and signal connections. |
-| `scene_validate` | Verifies each connection points at a method that exists. Connections are unvalidated strings, so a stale one fails only at runtime. |
+| `scene_validate` | Checks every connection points at a method that exists. |
 
-### Runtime (debugger)
+### Runtime
 
-Godot serves a Debug Adapter Protocol server from the editor on port 6006, with no
-addon required. The language server can tell you whether code compiles; only the
-debugger can tell you what it actually **did**.
+Godot serves a Debug Adapter Protocol server from the editor, no addon required. The language
+server tells you whether code compiles; only the debugger tells you what it **did**.
 
 | Tool | Description |
 |------|-------------|
-| `debug_run` | **Run the project and return what it printed.** Closes the loop: edit, sync, run, read the actual behaviour — no F5, no pasting console output back. |
-| `debug_status` | Adapter connection, capabilities, and whether the game is running or paused. |
-| `debug_output` | Console output from the running game — `print`, stdout, stderr, and runtime errors with their source location. Drained on each call. |
-| `debug_set_breakpoints` | Set breakpoints in a file (0-based lines, converted to DAP's 1-based on the wire). |
+| `debug_run` | Run the project and return what it printed. |
+| `debug_output` | Console output from a running game — `print`, stdout, stderr, and runtime errors with their source location. Drained on each call. |
+| `debug_set_breakpoints` | Set breakpoints in a file. |
 | `debug_stack_trace` | The call stack where execution is paused. Empty means not paused. |
 | `debug_inspect` | Variables in a stack frame, by scope. |
-| `debug_evaluate` | Evaluate a GDScript expression at a breakpoint, instead of adding `print` and re-running. |
-| `debug_continue` / `debug_pause` / `debug_step_over` | Execution control. |
+| `debug_evaluate` | Evaluate an expression at a breakpoint, instead of adding `print` and re-running. |
+| `debug_continue`, `debug_pause`, `debug_step_over` | Execution control. |
 | `debug_terminate` | Stop the running game. |
+| `debug_status` | Adapter connection and whether the game is running or paused. |
 
-Measured on Godot 4.7.1, including headless — so this works in CI as well as beside an
-open editor.
+## What Godot cannot tell you
 
-One implementation note worth recording, because it cost time: Godot does not answer
-the DAP `launch` request until `configurationDone` arrives. Sending `configurationDone`
-first, which is how the DAP setup sequence usually reads, deadlocks and is
-indistinguishable from `launch` being unsupported.
+Worth knowing before you trust a result:
 
-### Synchronization
-
-Godot's LSP does not watch the filesystem, so it must be told when a file changes.
-
-| Tool | Description |
-|------|-------------|
-| `gdscript_sync_file` | Sync one modified file and get its diagnostics. |
-| `gdscript_sync_files` | Sync several at once. |
-| `gdscript_release_file` | Release a file from the LSP session so it reads from disk again. |
-
-### Diagnostics and batch
-
-| Tool | Description |
-|------|-------------|
-| `gdscript_diagnostics` | Errors and warnings for one or more files. |
-| `gdscript_symbols_batch` | Symbols for several files in one call. |
-| `gdscript_definitions_batch` | Definitions for several positions. |
-| `gdscript_references_batch` | References for several symbols. |
-
-Results carry a `verified` flag where it matters: `true` means Godot checked the file
-and reported back, `false` means it did not answer in time. An empty diagnostics list
-with `verified: false` is **not** a clean bill of health.
+- **The language server reads `.gd` files only.** A signal handler wired in a `.tscn`
+  `[connection]` block is invisible to it, so renaming that handler leaves the scene pointing
+  at a method that no longer exists — and that fails at runtime with no compile error. This is
+  why `scene_validate` exists and why `gdscript_rename` warns.
+- **Autoload and input action names are bare strings.** `GameState.add_score(1)` and
+  `Input.is_action_pressed("jump")` are validated by nothing at all. Check them against
+  `project_config` before writing them.
+- **`gdscript_references` is expensive on 4.6+**, reparsing every script in the project.
+  Prefer `gdscript_references_in_file` when one file is enough.
 
 ## Architecture
 
+Three mechanisms, one process. Each tool group maps to exactly one of them, which is how you
+know where an answer came from.
+
+```mermaid
+flowchart TD
+    Agent["AI Agent"]
+    GL["<b>GodotLens</b><br/>MCP server · JSON-RPC 2.0<br/>Python 3.10+ · no dependencies"]
+
+    Agent <-- "stdio" --> GL
+
+    GL -- "TCP 6005<br/>language server" --> Editor
+    GL -- "TCP 6006<br/>debug adapter" --> Editor
+    GL -- "subprocess<br/>--headless --script" --> Binary
+
+    Editor["<b>Godot Editor</b><br/>must be open<br/><i>gdscript_* · debug_*</i>"]
+    Binary["<b>Godot binary</b><br/>invoked on demand<br/><i>scene_* · project_config</i>"]
+
+    classDef svc fill:#eef4fb,stroke:#4a6785,stroke-width:1px,color:#1b2733;
+    classDef godot fill:#f3f0fb,stroke:#6b5b95,stroke-width:1px,color:#1b2733;
+    class Agent,GL svc;
+    class Editor,Binary godot;
 ```
-┌──────────────┐         ┌────────────────────┐         ┌───────────────────┐
-│   AI Agent   │  stdio  │  GodotLens (MCP)   │   TCP   │  Godot Editor     │
-│ (Claude, etc)├────────►│  JSON-RPC 2.0      ├────────►│  Built-in LSP     │
-│              │◄────────┤  Python 3.10+      │◄────────┤  Port 6005        │
-└──────────────┘         └────────────────────┘         └───────────────────┘
+
+The MCP and LSP/DAP protocols are implemented directly against the standard library, so the
+package has **zero runtime dependencies** and the npm bundle is a handful of `.py` files.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `GODOT_LSP_HOST` | `127.0.0.1` | Language server host |
+| `GODOT_LSP_PORT` | `6005` | Language server port. The official VS Code extension uses `6008` |
+| `GODOT_DAP_HOST` | `127.0.0.1` | Debug adapter host |
+| `GODOT_DAP_PORT` | `6006` | Debug adapter port, used by `debug_*` |
+| `GODOT_BIN` | auto | Godot executable, required by `scene_*` and `project_config` |
+| `GODOT_PROJECT_ROOT` | auto | Project root; auto-detected by walking up for `project.godot` |
+| `GODOT_LSP_TIMEOUT` | `15` | Seconds to wait for a single language server response |
+| `GODOT_DIAGNOSTICS_TIMEOUT` | `8` | Seconds to wait for diagnostics after a sync |
+| `GODOT_VERSION` | auto | Override capability detection |
+
+## Contributing
+
+```bash
+pip install -e ".[dev]"
+pytest -m "not integration"   # no Godot needed
+ruff check .
 ```
 
-GodotLens acts as a bridge between the AI agent and Godot's built-in Language Server. The AI agent communicates with GodotLens via MCP (JSON-RPC over stdio). GodotLens translates MCP tool calls into LSP requests and sends them to the Godot editor over TCP. Responses are compacted for efficient AI consumption.
+Integration tests launch a real headless Godot and skip cleanly without one:
 
-**Zero dependencies** — the server uses only the Python standard library. The MCP and LSP protocols are implemented directly, keeping the server lightweight and self-contained.
+```bash
+GODOT_BIN=/path/to/godot pytest -m integration
+```
 
-## Important: File Synchronization
-
-Godot's LSP does not automatically detect file changes made outside the editor. When the AI agent modifies a `.gd` file, it should call `gdscript_sync_file` or `gdscript_sync_files` so the LSP re-analyzes the changed code. Without this, diagnostics and navigation results may be stale.
-
-**Recommended workflow:**
-1. Use GodotLens tools to analyze code
-2. Write changes to files
-3. Call `gdscript_sync_file` to refresh LSP state
-4. Use GodotLens tools to verify changes
-
-## Coordinate System
-
-All line and character parameters are **0-indexed**, matching the LSP specification:
-- Line 0, Character 0 = first character of the file
+CI runs the suite on Linux, Windows and macOS across Python 3.10–3.13, runs the integration
+tests against a real Godot on all three, and installs the built npm tarball and executes it.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 <!-- mcp-name: io.github.pzalutski-pixel/godotlens -->

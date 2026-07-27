@@ -13,13 +13,13 @@ dynamic = ["version"]
 description = "MCP server giving AI agents Godot's own view of a GDScript project: navigation, diagnostics, engine API, and scene verification"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Peter Zalutski"}]
 keywords = ["mcp", "mcp-server", "godot", "gdscript", "lsp", "code-analysis", "code-intelligence", "semantic-analysis", "ai-agents", "claude", "developer-tools"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

@@ -1,9 +1,9 @@
 {
   "name": "godotlens-mcp",
   "mcpName": "io.github.pzalutski-pixel/godotlens",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server giving AI agents Godot's own view of a GDScript project: navigation, diagnostics, engine API, and scene verification",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Peter Zalutski",
   "repository": {
     "type": "git",
@@ -16,7 +16,9 @@
   "files": [
     "bin/",
     "server/",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "keywords": [
     "mcp",
