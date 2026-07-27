@@ -121,6 +121,10 @@ jobs:
           mkdir -p npm/server
           cp -r src/godotlens_mcp npm/server/godotlens_mcp
           find npm/server -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+          # npm pack runs inside npm/, so it cannot reach the repo root. Without this
+          # copy the files entry silently matches nothing and the package ships with
+          # no licence at all, which Apache 2.0 sections 4(a) and 4(d) require.
+          cp LICENSE NOTICE npm/
 
       - name: Pack and install into a clean directory
         shell: bash
@@ -128,6 +132,16 @@ jobs:
           set -euo pipefail
           cd npm && npm pack
           tarball="$(ls godotlens-mcp-*.tgz)"
+          # Assert on the ARTIFACT, not on package.json's files array. v1.1.0 shipped
+          # without LICENSE or NOTICE because the manifest listed them while npm pack
+          # could not reach them, and a manifest-only check reported success.
+          echo "--- tarball contents ---"
+          tar -tzf "$tarball"
+          for required in package/LICENSE package/NOTICE package/README.md \
+                          package/bin/godotlens-mcp.js package/server/godotlens_mcp/__main__.py; do
+            tar -tzf "$tarball" | grep -qx "$required" \
+              || { echo "::error::$required missing from the npm tarball"; exit 1; }
+          done
           mkdir -p "$RUNNER_TEMP/pkgtest" && cd "$RUNNER_TEMP/pkgtest"
           npm init -y >/dev/null
           npm install --no-audit --no-fund "$GITHUB_WORKSPACE/npm/$tarball"

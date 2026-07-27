@@ -151,6 +151,27 @@ def test_notice_file_ships_with_both_distributions():
     assert "NOTICE" in pyproject
 
 
+def test_workflows_copy_the_licence_into_the_npm_bundle():
+    """Listing a file in package.json does not put it in the tarball.
+
+    v1.1.0 shipped with no LICENSE and no NOTICE: npm pack runs inside npm/ and
+    cannot reach the repo root, so the files entry matched nothing and npm omitted
+    them without complaint. Both workflows must copy them in before packing.
+    """
+    for name in ("release.yml", "ci.yml"):
+        workflow = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        assert "cp LICENSE NOTICE npm/" in workflow, f"{name} does not stage the licence"
+
+
+def test_workflows_assert_on_the_tarball_contents():
+    """The check that failed was manifest-only. It must inspect the artifact."""
+    for name in ("release.yml", "ci.yml"):
+        workflow = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        assert "tar -tzf" in workflow, f"{name} never inspects the built tarball"
+        assert "package/LICENSE" in workflow
+        assert "package/NOTICE" in workflow
+
+
 def test_changelog_covers_the_current_version():
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert f"[{__version__}]" in text, f"CHANGELOG has no entry for {__version__}"

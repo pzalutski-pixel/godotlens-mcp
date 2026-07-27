@@ -7,12 +7,12 @@
     "url": "https://github.com/pzalutski-pixel/godotlens-mcp",
     "source": "github"
   },
-  "version": "1.1.0",
+  "version": "1.1.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "godotlens-mcp",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -80,7 +80,7 @@
     {
       "registryType": "pypi",
       "identifier": "godotlens-mcp",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

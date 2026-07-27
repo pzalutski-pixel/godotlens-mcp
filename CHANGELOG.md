@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-27
+
+### Fixed
+
+- **The 1.1.0 npm package shipped with no `LICENSE` and no `NOTICE`.** `npm pack` runs
+  inside `npm/`, so it cannot reach the repository root; the `files` entry listed both
+  and matched nothing, and npm omitted them without complaint. That left the published
+  package out of compliance with Apache 2.0 sections 4(a) and 4(d). Both workflows now
+  stage the files before packing.
+
+  The check that was supposed to catch this asserted on `package.json`'s `files` array
+  rather than on the built tarball — the same manifest-instead-of-artifact mistake that
+  let a broken npm package ship for six releases. Both workflows now unpack the tarball
+  and assert the required paths are present before publishing, and the unit guard checks
+  that they do.
+
+  Unaffected: the PyPI distribution, which carries both files correctly.
+
 ## [1.1.0] - 2026-07-26
 
 Correctness release. Everything below was verified against a real Godot 4.7.1
