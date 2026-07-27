@@ -180,6 +180,27 @@ def test_release_workflow_strips_pycache_from_the_bundle():
     assert "__pycache__" in workflow
 
 
+def test_release_verifies_the_tag_matches_the_package_version():
+    """PyPI takes its version from __init__.py while npm takes it from the tag.
+
+    A mismatched tag would publish two different versions under one release.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "verify-version" in workflow
+    assert "__version__" in workflow
+
+
+def test_release_runs_the_built_package_before_publishing():
+    """ci.yml does not run on tag pushes, so the packaging check must exist here too.
+
+    Without it, the bug that broke six releases could ship again unnoticed.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "npm pack" in workflow
+    assert "godotlens-mcp" in workflow
+    assert "serverInfo" in workflow, "must assert the package actually answers"
+
+
 def test_ci_runs_on_every_platform_and_tests_the_package():
     """Tests previously ran only on tag push, only on Linux, and never on the artifact."""
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

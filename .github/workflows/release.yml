@@ -10,7 +10,26 @@ permissions:
   id-token: write
 
 jobs:
+  # The tag drives npm and server.json versions, while PyPI takes its version from
+  # __init__.py. Tagging v1.2.0 with __init__.py still at 1.1.0 would publish two
+  # different versions under one release, so refuse before anything is uploaded.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match the package version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/godotlens_mcp/__init__.py)"
+          echo "tag=$tag package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match __version__ $pkg in src/godotlens_mcp/__init__.py"
+            exit 1
+          fi
+
   test:
+    needs: verify-version
     strategy:
       fail-fast: true
       matrix:
@@ -72,12 +91,37 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Bundle server into npm package
         run: |
           mkdir -p npm/server
           cp -r src/godotlens_mcp npm/server/godotlens_mcp
           # A local build would otherwise ship .pyc files alongside the source.
           find npm/server -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+      # Six releases shipped an npm package that could not start, because nothing
+      # ever executed the built artifact. Do that here, before publishing, so a
+      # broken bundle fails the release instead of reaching users.
+      - name: Verify the built package actually runs
+        run: |
+          set -euo pipefail
+          cd npm && npm pack
+          tarball="$(ls godotlens-mcp-*.tgz)"
+          mkdir -p "$RUNNER_TEMP/verify" && cd "$RUNNER_TEMP/verify"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$GITHUB_WORKSPACE/npm/$tarball"
+          out="$(printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release-check","version":"0"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | ./node_modules/.bin/godotlens-mcp)"
+          echo "$out" | head -c 400
+          echo "$out" | grep -q '"serverInfo"' || { echo "::error::package did not answer initialize"; exit 1; }
+          echo "$out" | grep -q '"gdscript_status"' || { echo "::error::package did not answer tools/list"; exit 1; }
+          rm -f "$GITHUB_WORKSPACE/npm/$tarball"
 
       - name: Publish to npm
         working-directory: npm
