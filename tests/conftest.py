@@ -74,6 +74,24 @@ class FakeLSP:
             except (asyncio.TimeoutError, Exception):
                 pass
 
+    def count(self, method: str) -> int:
+        return sum(1 for m in self.received if m.get("method") == method)
+
+    async def wait_for_method(self, method: str, count: int = 1, timeout: float = 5.0) -> None:
+        """Await at least ``count`` messages of ``method``.
+
+        Notifications are fire-and-forget, so the client returns before the server has
+        necessarily read them; asserting immediately is a race.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            if self.count(method) >= count:
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError(
+            f"expected >= {count} {method}, saw {self.count(method)}; "
+            f"received methods: {[m.get('method') for m in self.received]}")
+
     async def wait_for_received(self, predicate, timeout: float = 5.0) -> dict:
         """Await a message matching ``predicate``; the client writes asynchronously."""
         deadline = asyncio.get_event_loop().time() + timeout

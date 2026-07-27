@@ -7,6 +7,8 @@ import re
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
+from godotlens_mcp.capabilities import Capabilities
+
 DEFAULT_TIMEOUT = 15.0
 
 
@@ -54,6 +56,12 @@ class LSPClient:
         self.native_capabilities: dict = {}
         self.server_messages: list[str] = []
         self.workspace_mismatch: str | None = None
+        self.capabilities = Capabilities()
+        # URIs this connection has opened. Godot 4.6+ rejects a second didOpen for a
+        # file it already owns (ERR_FAIL_COND_MSG on managed_files) and returns before
+        # reparsing, so the first text stays cached and poisons every later query.
+        # Re-syncing must use didChange, which means tracking what is open.
+        self._open_docs: dict[str, int] = {}  # uri -> document version
         # Serializes request/response pairs over the single shared socket.
         self._lock = asyncio.Lock()
 
@@ -104,6 +112,7 @@ class LSPClient:
         self.reader = None
         self.writer = None
         self.initialized = False
+        self._open_docs.clear()
 
     async def disconnect(self):
         """Disconnect from LSP server."""
@@ -117,6 +126,8 @@ class LSPClient:
         self.writer = None
         self.initialized = False
         self.server_capabilities = {}
+        # Document ownership is per-connection; a reconnect starts from nothing open.
+        self._open_docs.clear()
 
     async def _initialize(self):
         if self.initialized:
@@ -131,6 +142,7 @@ class LSPClient:
             "capabilities": {},
         })
         self.server_capabilities = (result or {}).get("capabilities", {}) or {}
+        self.capabilities = Capabilities(self.server_capabilities)
         await self.notify("initialized", {})
         # Godot pushes gdscript/capabilities (the full native class list) right after
         # initialized, plus changeWorkspace/showMessage if we named the wrong project.
@@ -251,6 +263,46 @@ class LSPClient:
             "id": req_id,
             "error": {"code": -32601, "message": f"Method not found: {method}"},
         })
+
+    async def sync_document(self, uri: str, text: str, notify_save: bool = True) -> str:
+        """Push current file contents to the LSP, opening or updating as appropriate.
+
+        Returns "opened" or "changed". Godot 4.6+ hard-rejects a repeat didOpen, so a
+        file already open on this connection must be updated with didChange (Full
+        sync) instead — otherwise the LSP keeps serving the text from the first sync.
+        """
+        if uri in self._open_docs:
+            version = self._open_docs[uri] + 1
+            self._open_docs[uri] = version
+            await self.notify("textDocument/didChange", {
+                "textDocument": {"uri": uri, "version": version},
+                # textDocumentSync.change == 1 (Full): one range-less content entry.
+                "contentChanges": [{"text": text}],
+            })
+            action = "changed"
+        else:
+            self._open_docs[uri] = 1
+            await self.notify("textDocument/didOpen", {
+                "textDocument": {"uri": uri, "languageId": "gdscript",
+                                 "version": 1, "text": text},
+            })
+            action = "opened"
+
+        if notify_save:
+            await self.notify("textDocument/didSave", {
+                "textDocument": {"uri": uri}, "text": text})
+        return action
+
+    async def close_document(self, uri: str) -> bool:
+        """Release a document so the LSP stops shadowing the on-disk copy."""
+        if uri not in self._open_docs:
+            return False
+        await self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+        self._open_docs.pop(uri, None)
+        return True
+
+    def is_open(self, uri: str) -> bool:
+        return uri in self._open_docs
 
     async def wait_for_diagnostics(self, keys: list[str], timeout: float = 5.0) -> set[str]:
         """Drain until every key has a published diagnostics entry, or time runs out.

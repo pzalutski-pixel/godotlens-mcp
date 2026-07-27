@@ -41,7 +41,7 @@ def test_list_tools_names():
         "gdscript_rename",
         "gdscript_sync_file",
         "gdscript_sync_files",
-        "gdscript_delete_file",
+        "gdscript_release_file",
         "gdscript_symbols_batch",
         "gdscript_definitions_batch",
         "gdscript_references_batch",

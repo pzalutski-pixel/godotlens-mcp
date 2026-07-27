@@ -305,17 +305,20 @@ TOOLS = [
         },
     },
     {
-        "name": "gdscript_delete_file",
+        "name": "gdscript_release_file",
         "description": (
-            "Notify Godot's LSP that a file was deleted from the project. "
-            "Returns: confirmation of deletion. "
-            "WHEN TO CALL: After deleting a .gd file from disk. "
-            "Ensures LSP removes the file from its analysis and clears stale diagnostics."
+            "Release a file from the LSP session, so Godot stops serving the copy this "
+            "session opened and reads from disk again. "
+            "Returns: whether the file was open, and what was actually done. "
+            "WHEN TO CALL: after deleting a .gd file, or when you want the LSP to forget "
+            "content you synced earlier. "
+            "NOTE: Godot removed its file-deletion notification in 4.6, so this cannot "
+            "purge project-wide state; that clears when the editor rescans."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file": {"type": "string", "description": "Absolute or relative path to the deleted .gd file"},
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
             },
             "required": ["file"],
         },
@@ -541,18 +544,17 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             if content is None:
                 content = await read_text_file(file_path)
             uri = file_uri(file_path)
-            await _lsp.notify("textDocument/didOpen", {
-                "textDocument": {"uri": uri, "languageId": "gdscript", "version": 1, "text": content}
-            })
-            await _lsp.notify("textDocument/didSave", {
-                "textDocument": {"uri": uri}, "text": content
-            })
+            action = await _lsp.sync_document(uri, content)
 
             key = canonical_key(file_path)
+            # A re-sync republishes diagnostics, so drop the previous entry to avoid
+            # reading a stale one and calling it verified.
+            _lsp.diagnostics_cache.pop(key, None)
             missing = await _lsp.wait_for_diagnostics([key], timeout=DIAGNOSTICS_TIMEOUT)
 
             result = {
                 "synced": file_path,
+                "action": action,
                 "diagnostics": _compact_diagnostics(_lsp.diagnostics_cache.get(key, [])),
                 # Distinguishes "Godot checked it and it is clean" from "Godot never
                 # reported back". Reporting the second as clean is how broken code
@@ -572,12 +574,8 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 try:
                     content = await read_text_file(file_path)
                     uri = file_uri(file_path)
-                    await _lsp.notify("textDocument/didOpen", {
-                        "textDocument": {"uri": uri, "languageId": "gdscript", "version": 1, "text": content}
-                    })
-                    await _lsp.notify("textDocument/didSave", {
-                        "textDocument": {"uri": uri}, "text": content
-                    })
+                    _lsp.diagnostics_cache.pop(canonical_key(file_path), None)
+                    await _lsp.sync_document(uri, content)
                     synced_uris.append((file_path, uri))
                 except (OSError, UnsupportedPathError) as e:
                     errors.append({"file": file_path, "error": str(e)})
@@ -601,16 +599,22 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             if errors:
                 result["errors"] = errors
 
-        elif name == "gdscript_delete_file":
+        elif name == "gdscript_release_file":
             file_path = arguments["file"]
             uri = file_uri(file_path)
-            await _lsp.notify("textDocument/didClose", {
-                "textDocument": {"uri": uri}
-            })
-            await _lsp.notify("workspace/didDeleteFiles", {
-                "files": [{"uri": uri}]
-            })
-            result = {"deleted": file_path}
+            was_open = await _lsp.close_document(uri)
+            _lsp.diagnostics_cache.pop(canonical_key(file_path), None)
+            result = {
+                "released": file_path,
+                "was_open": was_open,
+                # Godot removed the entire workspace/* namespace in 4.6, and sending
+                # didDeleteFiles as a NOTIFICATION means its METHOD_NOT_FOUND is
+                # discarded - which is how the old tool reported success for a total
+                # no-op. didClose is the only portable effect available.
+                "note": ("Released the document from the LSP. Godot has no working "
+                         "file-deletion notification on 4.6+, so stale project-wide "
+                         "state clears when the editor rescans."),
+            }
 
         # Batch operations
         elif name == "gdscript_symbols_batch":
@@ -661,10 +665,9 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             for file_path in arguments["files"]:
                 try:
                     content = await read_text_file(file_path)
-                    uri = file_uri(file_path)
-                    await _lsp.notify("textDocument/didOpen", {
-                        "textDocument": {"uri": uri, "languageId": "gdscript", "version": 1, "text": content}
-                    })
+                    # No didSave here: this is a read-only check, and didSave triggers
+                    # a real script hot-reload inside the editor.
+                    await _lsp.sync_document(file_uri(file_path), content, notify_save=False)
                 except (OSError, UnsupportedPathError) as e:
                     results[file_path] = {"error": str(e)}
 

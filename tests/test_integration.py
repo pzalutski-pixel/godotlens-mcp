@@ -135,6 +135,53 @@ async def test_references_cannot_see_scene_connections(live_lsp):
         await client.disconnect()
 
 
+async def test_resync_survives_the_4_6_did_open_guard(live_lsp, tmp_path):
+    """Syncing the same file twice must not poison the document.
+
+    Godot 4.6+ has ERR_FAIL_COND_MSG(managed_files.has(path)) in lsp_did_open and
+    returns *before* reparsing, so a second didOpen leaves the first text cached for
+    the life of the connection and every later query answers from stale source.
+    sync_document() switches to didChange for an already-open file.
+    """
+    port, project = live_lsp
+    scratch = project / "resync_probe.gd"
+    scratch.write_text("extends Node\n\n\nfunc first_name() -> void:\n\tpass\n", encoding="utf-8")
+
+    client = await _client(port)
+    try:
+        uri = file_uri(str(scratch))
+        await client.sync_document(uri, scratch.read_text(encoding="utf-8"))
+        await client.wait_for_diagnostics([canonical_key(str(scratch))], timeout=15.0)
+
+        symbols = await client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        names = _symbol_names(symbols)
+        assert "first_name" in names, f"initial sync failed: {names}"
+
+        # Now rewrite the file and re-sync, exactly as an agent editing code would.
+        updated = "extends Node\n\n\nfunc second_name() -> void:\n\tpass\n"
+        scratch.write_text(updated, encoding="utf-8")
+        assert await client.sync_document(uri, updated) == "changed"
+
+        symbols = await client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        names = _symbol_names(symbols)
+        assert "second_name" in names, f"LSP served stale text after re-sync: {names}"
+        assert "first_name" not in names
+    finally:
+        await client.disconnect()
+
+
+def _symbol_names(symbols) -> set[str]:
+    found = set()
+
+    def walk(nodes):
+        for node in nodes or []:
+            found.add(node.get("name", ""))
+            walk(node.get("children"))
+
+    walk(symbols)
+    return found
+
+
 async def test_unsupported_method_errors_without_killing_the_connection(live_lsp):
     """workspace/* was removed in Godot 4.6; it must fail loudly and stay usable."""
     from godotlens_mcp.lsp_client import LSPError
