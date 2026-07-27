@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -169,6 +170,103 @@ class FakeLSP:
                 writer.close()
             except Exception:
                 pass
+
+
+class FakeDAP(FakeLSP):
+    """A fake debug adapter.
+
+    DAP shares LSP's Content-Length framing but correlates on seq/request_seq and
+    carries an explicit message type, so responses and events need their own shapes.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.bodies: dict[str, object] = {}
+        self.failures: dict[str, str] = {}
+        self.push_events: list[dict] = []
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self._peers.append(writer)
+        try:
+            while True:
+                headers = {}
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        return
+                    text = line.decode().strip()
+                    if not text:
+                        break
+                    if ":" in text:
+                        key, val = text.split(":", 1)
+                        headers[key.strip().lower()] = val.strip()
+
+                length = int(headers.get("content-length", 0))
+                if length <= 0:
+                    continue
+                msg = json.loads((await reader.readexactly(length)).decode())
+                self.received.append(msg)
+
+                if msg.get("type") != "request":
+                    continue
+                command = msg.get("command", "")
+
+                for event in self.push_events:
+                    await self._write(writer, event)
+                self.push_events = []
+
+                if self.drop_connection:
+                    writer.close()  # adapter vanishes mid-request, as a killed editor would
+                    return
+
+                if command in self.silent_methods:
+                    continue
+
+                if command in self.failures:
+                    await self._write(writer, {
+                        "seq": 0, "type": "response", "request_seq": msg["seq"],
+                        "command": command, "success": False,
+                        "message": self.failures[command]})
+                else:
+                    await self._write(writer, {
+                        "seq": 0, "type": "response", "request_seq": msg["seq"],
+                        "command": command, "success": True,
+                        "body": self.bodies.get(command, {})})
+        except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionAbortedError):
+            return
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+
+@pytest.fixture
+async def fake_dap():
+    server = FakeDAP()
+    await server.start()
+    server.bodies["initialize"] = {
+        "supportsConfigurationDoneRequest": True,
+        "supportsTerminateRequest": True,
+        "supportsEvaluateForHovers": True,
+    }
+    try:
+        yield server
+    finally:
+        await server.stop()
+
+
+@pytest.fixture
+async def dap_client(fake_dap):
+    from godotlens_mcp.dap_client import DAPClient
+
+    client = DAPClient(port=fake_dap.port, timeout=5.0)
+    ok, msg = await client.connect()
+    assert ok, msg
+    try:
+        yield client
+    finally:
+        await client.disconnect()
 
 
 @pytest.fixture
@@ -466,6 +564,17 @@ def godot_binary() -> str:
     return binary
 
 
+class LiveGodot(NamedTuple):
+    """A running headless editor. Unpacks as (lsp_port, project) for existing tests."""
+
+    lsp_port: int
+    dap_port: int
+    project: Path
+
+    def __iter__(self):
+        return iter((self.lsp_port, self.project))
+
+
 @pytest.fixture(scope="session")
 def live_lsp(godot_binary, godot_project_session):
     """Launch one headless Godot editor for the session; yield (port, project root).
@@ -477,13 +586,14 @@ def live_lsp(godot_binary, godot_project_session):
     seconds, so per-test launches make the suite unusable.
     """
     port = free_port()
+    dap_port = free_port()
     log_path = godot_project_session.parent / "godot-editor.log"
     # Never use PIPE here: Godot's import output is verbose enough to fill the pipe
     # buffer, and with nobody draining it the process blocks before it binds the port.
     log_file = open(log_path, "wb")
     proc = subprocess.Popen(
         [godot_binary, "--path", str(godot_project_session), "--editor", "--headless",
-         "--lsp-port", str(port)],
+         "--lsp-port", str(port), "--dap-port", str(dap_port)],
         stdout=log_file, stderr=subprocess.STDOUT,
     )
     try:
@@ -492,7 +602,9 @@ def live_lsp(godot_binary, godot_project_session):
             log_file.close()
             tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
             pytest.skip(f"Godot LSP did not come up on port {port}. Editor log tail:\n{tail}")
-        yield port, godot_project_session
+        # The debug adapter comes up with the editor, on its own port.
+        wait_for_port(dap_port, timeout=30.0)
+        yield LiveGodot(lsp_port=port, dap_port=dap_port, project=godot_project_session)
     finally:
         proc.terminate()
         try:

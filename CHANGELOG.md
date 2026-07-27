@@ -66,6 +66,14 @@ editor, not inferred. Several of these were returning confident wrong answers.
   writing to disk**.
 - `gdscript_references_in_file` — `documentHighlight` on Godot 4.7+, avoiding the
   whole-project reparse that `references` triggers on 4.6+.
+- **Runtime inspection via Godot's Debug Adapter Protocol** (`debug_*`, 10 tools).
+  Godot serves DAP from the editor on port 6006 with no addon, so this keeps the
+  zero-install property the LSP bridge already had. It closes the one part of the
+  edit-verify loop the language server cannot reach: the LSP says whether code
+  compiles, the debugger says what it did — printed output, runtime errors with a
+  stack trace, and variable values at a breakpoint. Verified on 4.7.1: the adapter
+  runs headless and answers `setBreakpoints`, `threads`, `stackTrace`, `scopes` and
+  execution control; launching a game needs a non-headless editor.
 - `scene_state` and `scene_validate` — Godot's own resolved view of a `.tscn`
   (node tree, script attachments, signal connections), obtained by running the
   engine rather than parsing the format. Godot's reference search reads `.gd` files

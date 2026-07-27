@@ -7,6 +7,12 @@ import sys
 from typing import Any
 
 from godotlens_mcp import __version__
+from godotlens_mcp.dap_client import (
+    DAPClient,
+    DAPConnectionLost,
+    DAPError,
+    DAPTimeout,
+)
 from godotlens_mcp.lsp_client import (
     LSPClient,
     LSPConnectionLost,
@@ -27,6 +33,7 @@ from godotlens_mcp.scene import (
 )
 
 _lsp: LSPClient | None = None
+_dap: DAPClient | None = None
 
 # MCP revisions this server implements, newest first. The client's requested version
 # is honoured when we support it; otherwise we answer with our latest, per the spec.
@@ -36,6 +43,10 @@ LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 # How long to wait for Godot to publish diagnostics after a sync. A cold project or a
 # busy editor can take seconds; the previous fixed 0.3s sleep silently reported clean.
 DIAGNOSTICS_TIMEOUT = float(os.environ.get("GODOT_DIAGNOSTICS_TIMEOUT", "8.0"))
+
+# Godot's debug adapter, served by the editor alongside the language server.
+DAP_PORT = int(os.environ.get("GODOT_DAP_PORT", "6006"))
+DAP_HOST = os.environ.get("GODOT_DAP_HOST", "127.0.0.1")
 
 SERVER_INSTRUCTIONS = (
     "GodotLens exposes Godot's own language server, so answers reflect how Godot "
@@ -576,12 +587,191 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
+    # Runtime inspection via Godot's Debug Adapter Protocol (port 6006).
+    # The language server can say whether code compiles; only the debugger can say
+    # what it actually did.
+    {
+        "name": "debug_status",
+        "description": (
+            "Check the connection to Godot's debug adapter and report whether the game is "
+            "running, paused, or finished. "
+            "The adapter is served by the Godot editor on port 6006 and needs no addon. "
+            "Use this first if any debug_* tool behaves unexpectedly."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "debug_output",
+        "description": (
+            "Read console output the running game produced - print() calls, stdout, stderr, "
+            "and runtime script errors with their source location. "
+            "Returns: captured lines with category and originating file/line. "
+            "THIS IS THE ONLY WAY to see what the game actually did; the language server "
+            "reports whether code compiles, not what it printed. "
+            "Output is drained on each call, so successive calls return only what is new."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wait": {"type": "number", "description": "Seconds to wait for output (default 1)"},
+                "clear": {"type": "boolean", "description": "Drain the buffer (default true)"},
+            },
+            "required": [],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "debug_set_breakpoints",
+        "description": (
+            "Set breakpoints in a GDScript file, replacing any previously set in that file. "
+            "Returns: each breakpoint with whether Godot verified it and the line it bound to. "
+            "IMPORTANT: lines are ZERO-BASED, matching every other tool here. "
+            "Set these before running the game, then use debug_stack_trace and debug_inspect "
+            "once execution stops."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Path to the .gd file"},
+                "lines": {
+                    "type": "array", "items": {"type": "integer"},
+                    "description": "Zero-based line numbers. Pass [] to clear all breakpoints in the file.",
+                },
+            },
+            "required": ["file", "lines"],
+        },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
+        },
+    },
+    {
+        "name": "debug_stack_trace",
+        "description": (
+            "Get the call stack where execution is currently paused. "
+            "Returns: frames with function name, file and ZERO-BASED line, plus why it stopped. "
+            "An empty frame list means execution is not paused - frames exist only while "
+            "stopped at a breakpoint or a runtime error."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "integer", "description": "Thread id (default 1)"},
+            },
+            "required": [],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "debug_inspect",
+        "description": (
+            "Inspect variables visible in a stack frame. "
+            "Returns: each scope (locals, members, globals) with its variables, values and types. "
+            "Use the frame_id from debug_stack_trace. Only meaningful while execution is paused."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "frame_id": {"type": "integer", "description": "Frame id from debug_stack_trace"},
+            },
+            "required": ["frame_id"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "debug_evaluate",
+        "description": (
+            "Evaluate a GDScript expression in the context of a paused frame. "
+            "Returns: the resulting value and its type. "
+            "Use to check state at a breakpoint without adding print() calls and re-running."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "GDScript expression"},
+                "frame_id": {"type": "integer", "description": "Frame id from debug_stack_trace"},
+            },
+            "required": ["expression"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "debug_continue",
+        "description": "Resume a paused game. Returns: confirmation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "integer", "description": "Thread id (default 1)"},
+            },
+            "required": [],
+        },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": False, "openWorldHint": False,
+        },
+    },
+    {
+        "name": "debug_pause",
+        "description": (
+            "Pause the running game. Returns: where it stopped. "
+            "Use to inspect state at an arbitrary moment rather than a preset breakpoint."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "integer", "description": "Thread id (default 1)"},
+            },
+            "required": [],
+        },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": False, "openWorldHint": False,
+        },
+    },
+    {
+        "name": "debug_step_over",
+        "description": "Step over one line in the paused game. Returns: the new stop location.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "integer", "description": "Thread id (default 1)"},
+            },
+            "required": [],
+        },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": False, "openWorldHint": False,
+        },
+    },
+    {
+        "name": "debug_terminate",
+        "description": "Stop the running game. Returns: confirmation.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": True,
+            "idempotentHint": True, "openWorldHint": False,
+        },
+    },
 ]
 
 
 # ---------------------------------------------------------------------------
 # Tool dispatch
 # ---------------------------------------------------------------------------
+
+async def ensure_dap() -> tuple[bool, str]:
+    """Connect to the debug adapter on demand.
+
+    Kept separate from the LSP connection: they are different ports and different
+    protocols, and a project with the language server working may still have the
+    debug adapter disabled.
+    """
+    global _dap
+    if _dap is None:
+        _dap = DAPClient(host=DAP_HOST, port=DAP_PORT)
+    return await _dap.connect()
+
 
 async def ensure_connected() -> tuple[bool, str]:
     """Ensure LSP is connected, return (ok, error_message)."""
@@ -679,6 +869,11 @@ async def _scan_scenes_for_symbol(symbol: str) -> list[dict]:
         return hits
 
     return await asyncio.get_event_loop().run_in_executor(None, _scan)
+
+
+async def _abspath(path: str) -> str:
+    """Resolve a path off the event loop."""
+    return await asyncio.get_event_loop().run_in_executor(None, os.path.abspath, path)
 
 
 async def _exists(path: str) -> bool:
@@ -868,6 +1063,99 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                     "line": h.get("range", {}).get("start", {}).get("line", 0),
                     "char": h.get("range", {}).get("start", {}).get("character", 0),
                 } for h in hits or []]
+
+        # Runtime (Debug Adapter Protocol, port 6006)
+        elif name.startswith("debug_"):
+            ok, message = await ensure_dap()
+            if not ok:
+                return tool_result(json.dumps({
+                    "error": message,
+                    "kind": "dap_disconnected",
+                    "hint": ("The debug adapter lives in the Godot editor. Confirm it is "
+                             "enabled under Editor Settings > Network > Debug Adapter, or "
+                             "start Godot with --dap-port."),
+                }), is_error=True)
+
+            if name == "debug_status":
+                await _dap.drain_events(0.3)
+                result = {
+                    "connected": True,
+                    "host": _dap.host,
+                    "port": _dap.port,
+                    "capabilities": _dap.capabilities,
+                    "stopped": _dap.stopped_state,
+                    "terminated": _dap.terminated,
+                    "buffered_output_lines": len(_dap.output),
+                }
+
+            elif name == "debug_output":
+                # Collect whatever the game has emitted since the last call.
+                await _dap.drain_events(float(arguments.get("wait", 1.0)))
+                lines = _dap.take_output(clear=bool(arguments.get("clear", True)))
+                result = {
+                    "lines": lines,
+                    "count": len(lines),
+                    "note": ("Empty means nothing was printed since the last call. Output "
+                             "only arrives while a game is running under the debugger."),
+                }
+
+            elif name == "debug_set_breakpoints":
+                result = {
+                    "file": arguments["file"],
+                    "breakpoints": await _dap.set_breakpoints(
+                        await _abspath(arguments["file"]), arguments["lines"]),
+                }
+
+            elif name == "debug_stack_trace":
+                await _dap.drain_events(0.3)
+                frames = await _dap.stack_trace(int(arguments.get("thread_id", 1)))
+                result = {
+                    "frames": frames,
+                    "stopped": _dap.stopped_state,
+                    "note": ("An empty frame list means execution is not currently paused. "
+                             "Frames are only available while stopped at a breakpoint or error."),
+                }
+
+            elif name == "debug_inspect":
+                frame_id = int(arguments["frame_id"])
+                scopes = await _dap.scopes(frame_id)
+                contents = []
+                for scope in scopes:
+                    reference = scope.get("variables_reference")
+                    variables = []
+                    if reference:
+                        try:
+                            variables = await _dap.variables(reference)
+                        except DAPError:
+                            variables = []
+                    contents.append({"scope": scope["name"], "variables": variables})
+                result = {"frame_id": frame_id, "scopes": contents}
+
+            elif name == "debug_evaluate":
+                result = await _dap.evaluate(
+                    arguments["expression"],
+                    int(arguments["frame_id"]) if arguments.get("frame_id") is not None else None)
+
+            elif name == "debug_continue":
+                await _dap.continue_execution(int(arguments.get("thread_id", 1)))
+                result = {"resumed": True}
+
+            elif name == "debug_pause":
+                await _dap.pause(int(arguments.get("thread_id", 1)))
+                await _dap.drain_events(1.0)
+                result = {"paused": True, "stopped": _dap.stopped_state}
+
+            elif name == "debug_step_over":
+                await _dap.step_over(int(arguments.get("thread_id", 1)))
+                await _dap.drain_events(1.0)
+                result = {"stepped": True, "stopped": _dap.stopped_state}
+
+            elif name == "debug_terminate":
+                await _dap.terminate()
+                result = {"terminated": True}
+
+            else:
+                return tool_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
 
         elif name == "scene_state":
             root = find_project_root()
@@ -1086,6 +1374,17 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
     except UnsupportedPathError as e:
         return tool_result(json.dumps({"error": str(e), "kind": "unsupported_path"}), is_error=True)
 
+    except (DAPConnectionLost, DAPTimeout) as e:
+        if _dap is not None:
+            await _dap.disconnect()
+        return tool_result(json.dumps({
+            "error": str(e), "kind": "dap_connection_lost",
+            "hint": "Call debug_status to reconnect to the debug adapter.",
+        }), is_error=True)
+
+    except DAPError as e:
+        return tool_result(json.dumps({"error": str(e), "kind": "dap_error"}), is_error=True)
+
     except GodotBinaryNotFound as e:
         return tool_result(json.dumps({"error": str(e), "kind": "godot_binary_missing"}), is_error=True)
 
@@ -1179,7 +1478,7 @@ async def handle_request(msg: dict) -> dict | None:
 
 async def main():
     """Run the MCP server over stdio."""
-    global _lsp
+    global _lsp, _dap
 
     host = os.environ.get("GODOT_LSP_HOST", "127.0.0.1")
     port = int(os.environ.get("GODOT_LSP_PORT", "6005"))
@@ -1203,6 +1502,9 @@ async def main():
     finally:
         await _lsp.disconnect()
         _lsp = None
+        if _dap is not None:
+            await _dap.disconnect()
+            _dap = None
 
 
 def main_sync():

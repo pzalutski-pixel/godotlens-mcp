@@ -89,6 +89,8 @@ pip install godotlens-mcp
 | `GODOT_PROJECT_ROOT` | auto | Project root. Auto-detected by walking up for `project.godot` |
 | `GODOT_BIN` | auto | Godot executable, required by the `scene_*` tools |
 | `GODOT_VERSION` | auto | Override capability detection |
+| `GODOT_DAP_HOST` | `127.0.0.1` | Godot debug adapter host |
+| `GODOT_DAP_PORT` | `6006` | Godot debug adapter port, used by the `debug_*` tools |
 
 ## Tools
 
@@ -134,6 +136,27 @@ inherited scenes. They do not parse `.tscn` as text.
 |------|-------------|
 | `scene_state` | Node tree, types, script attachments, `unique_name_in_owner` flags, exported values, and signal connections. |
 | `scene_validate` | Verifies each connection points at a method that exists. Connections are unvalidated strings, so a stale one fails only at runtime. |
+
+### Runtime (debugger)
+
+Godot serves a Debug Adapter Protocol server from the editor on port 6006, with no
+addon required. The language server can tell you whether code compiles; only the
+debugger can tell you what it actually **did**.
+
+| Tool | Description |
+|------|-------------|
+| `debug_status` | Adapter connection, capabilities, and whether the game is running or paused. |
+| `debug_output` | Console output from the running game — `print`, stdout, stderr, and runtime errors with their source location. Drained on each call. |
+| `debug_set_breakpoints` | Set breakpoints in a file (0-based lines, converted to DAP's 1-based on the wire). |
+| `debug_stack_trace` | The call stack where execution is paused. Empty means not paused. |
+| `debug_inspect` | Variables in a stack frame, by scope. |
+| `debug_evaluate` | Evaluate a GDScript expression at a breakpoint, instead of adding `print` and re-running. |
+| `debug_continue` / `debug_pause` / `debug_step_over` | Execution control. |
+| `debug_terminate` | Stop the running game. |
+
+Measured on Godot 4.7.1: the adapter runs headless and answers `setBreakpoints`,
+`threads`, `stackTrace`, `scopes` and execution control. **Launching a game requires a
+non-headless editor** — a headless editor has no display driver to run one.
 
 ### Synchronization
 
