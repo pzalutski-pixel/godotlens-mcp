@@ -67,3 +67,19 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]
+
+[tool.coverage.run]
+source = ["godotlens_mcp"]
+# The MCP server is exercised most thoroughly by tests that spawn it as a real
+# subprocess. Without parallel mode plus subprocess startup hooks, none of that
+# counts and server.py looks far less covered than it is.
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+sigterm = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
