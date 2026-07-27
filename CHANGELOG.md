@@ -83,9 +83,13 @@ editor, not inferred. Several of these were returning confident wrong answers.
   zero-install property the LSP bridge already had. It closes the one part of the
   edit-verify loop the language server cannot reach: the LSP says whether code
   compiles, the debugger says what it did — printed output, runtime errors with a
-  stack trace, and variable values at a breakpoint. Verified on 4.7.1: the adapter
-  runs headless and answers `setBreakpoints`, `threads`, `stackTrace`, `scopes` and
-  execution control; launching a game needs a non-headless editor.
+  stack trace, and variable values at a breakpoint. Verified on 4.7.1.
+- `debug_run` — run the project and return what it printed. The handshake order is
+  load-bearing and easy to get wrong: Godot withholds the `launch` response until
+  `configurationDone` arrives, so sending `configurationDone` first — the natural
+  reading of the DAP setup sequence — deadlocks and looks exactly like "launch is
+  unsupported". With the correct order it works, **including headless**, so this is
+  usable in CI and not only beside an open editor.
 - `scene_state` and `scene_validate` — Godot's own resolved view of a `.tscn`
   (node tree, script attachments, signal connections), obtained by running the
   engine rather than parsing the format. Godot's reference search reads `.gd` files

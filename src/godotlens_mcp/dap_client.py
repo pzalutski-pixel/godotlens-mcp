@@ -242,6 +242,69 @@ class DAPClient:
     async def configuration_done(self) -> None:
         await self.request("configurationDone", {})
 
+    async def launch(self, project_root: str, scene: str | None = None,
+                     timeout: float = 60.0, **extra: Any) -> dict:
+        """Run the project and start collecting its output.
+
+        The handshake order is load-bearing and not obvious: Godot does not answer
+        ``launch`` until ``configurationDone`` has arrived, so sending
+        ``configurationDone`` first — which reads as the natural setup order, and is
+        what the DAP overview diagram suggests — deadlocks. Both requests therefore go
+        out before either response is collected.
+
+        Verified against Godot 4.7.1: this returns, the game starts, and its stdout
+        arrives as output events.
+        """
+        arguments: dict = {"project": project_root, "request": "launch", "type": "godot"}
+        if scene:
+            arguments["scene"] = scene
+        arguments.update(extra)
+
+        async with self._lock:
+            self.output.clear()
+            self.events.clear()
+            self.terminated = False
+            self.stopped_state = None
+
+            self.seq += 1
+            launch_seq = self.seq
+            self.seq += 1
+            config_seq = self.seq
+
+            try:
+                await self._send({"seq": launch_seq, "type": "request",
+                                  "command": "launch", "arguments": arguments})
+                await self._send({"seq": config_seq, "type": "request",
+                                  "command": "configurationDone", "arguments": {}})
+
+                while True:
+                    message = await self._read_message(timeout)
+                    if message.get("type") == "event":
+                        self._record_event(message)
+                        continue
+                    if message.get("type") != "response":
+                        continue
+                    if message.get("request_seq") == launch_seq:
+                        if not message.get("success", False):
+                            raise DAPError(message.get("message") or "launch failed")
+                        return message.get("body") or {}
+            except asyncio.TimeoutError as exc:
+                raise DAPTimeout(
+                    f"Godot did not start the game within {timeout}s. Check that the "
+                    "editor is open on this project and the main scene is set."
+                ) from exc
+            except (asyncio.IncompleteReadError, ConnectionError, OSError) as exc:
+                raise DAPConnectionLost(f"Debug adapter connection lost: {exc}") from exc
+
+    async def collect_output(self, seconds: float, until_exit: bool = True) -> list[dict]:
+        """Gather output for a window, stopping early once the game exits."""
+        deadline = asyncio.get_event_loop().time() + seconds
+        while asyncio.get_event_loop().time() < deadline:
+            await self.drain_events(0.5)
+            if until_exit and self.terminated:
+                break
+        return self.take_output()
+
     async def threads(self) -> list[dict]:
         body = await self.request("threads", {})
         return (body or {}).get("threads", [])

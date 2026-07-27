@@ -468,6 +468,31 @@ jump={
 renderer/rendering_method="gl_compatibility"
 '''
 
+RUNTIME_PROBE_GD = '''extends Node2D
+
+## Prints identifiable output and then quits, so a debug_run test terminates itself.
+##
+## The quit is deferred deliberately. Calling get_tree().quit() straight from _ready
+## tears the debugger connection down before the print output is flushed, so the
+## harness sees the engine banner and nothing else.
+
+
+func _ready() -> void:
+	print("GODOTLENS_TEST: started")
+	print("GODOTLENS_TEST: score is ", GameState.score)
+	await get_tree().create_timer(1.5).timeout
+	print("GODOTLENS_TEST: quitting")
+	get_tree().quit()
+'''
+
+RUNTIME_MAIN_TSCN = '''[gd_scene load_steps=2 format=3 uid="uid://bqxvruntest01"]
+
+[ext_resource type="Script" path="res://runtime_probe.gd" id="1_probe"]
+
+[node name="RuntimeMain" type="Node2D"]
+script = ExtResource("1_probe")
+'''
+
 GAME_STATE_GD = '''extends Node
 
 var score: int = 0
@@ -491,6 +516,8 @@ def build_godot_project(root: Path) -> Path:
     (root / "broken.gd").write_text(BROKEN_GD, encoding="utf-8")
     (root / "game_state.gd").write_text(GAME_STATE_GD, encoding="utf-8")
     (root / "main.tscn").write_text(MAIN_TSCN, encoding="utf-8")
+    (root / "runtime_probe.gd").write_text(RUNTIME_PROBE_GD, encoding="utf-8")
+    (root / "runtime_main.tscn").write_text(RUNTIME_MAIN_TSCN, encoding="utf-8")
     return root
 
 

@@ -25,7 +25,7 @@ from godotlens_mcp.server import (
 # ---------------------------------------------------------------------------
 
 def test_list_tools_count():
-    assert len(TOOLS) == 32
+    assert len(TOOLS) == 33
 
 
 def test_list_tools_names():
@@ -61,6 +61,7 @@ def test_list_tools_names():
         "debug_pause",
         "debug_step_over",
         "debug_terminate",
+        "debug_run",
         "gdscript_find",
         "project_config",
     }
@@ -139,7 +140,7 @@ async def test_tools_list_response():
     msg = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     resp = await handle_request(msg)
     tools = resp["result"]["tools"]
-    assert len(tools) == 32
+    assert len(tools) == 33
     assert tools[0]["name"] == "gdscript_status"
 
 
@@ -447,4 +448,4 @@ def test_stdio_integration_initialize_and_tools_list():
 
     tools_response = json.loads(lines[1])
     assert tools_response["id"] == 2
-    assert len(tools_response["result"]["tools"]) == 32
+    assert len(tools_response["result"]["tools"]) == 33

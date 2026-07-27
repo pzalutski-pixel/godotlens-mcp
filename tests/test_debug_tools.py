@@ -184,3 +184,62 @@ def test_debug_tools_are_annotated_correctly():
     assert by_name["debug_stack_trace"]["annotations"]["readOnlyHint"] is True
     assert by_name["debug_terminate"]["annotations"]["destructiveHint"] is True
     assert by_name["debug_set_breakpoints"]["annotations"]["readOnlyHint"] is False
+
+
+# ---------------------------------------------------------------------------
+# Running the game
+# ---------------------------------------------------------------------------
+
+# The fixture project's main scene is main.tscn, which prints nothing and never
+# quits. runtime_main.tscn prints identifiable output and exits, so the test
+# terminates on its own. Passing it explicitly also covers the scene parameter,
+# which Godot accepts as a res:// path.
+RUN_ARGS = {"scene": "res://runtime_main.tscn", "collect": 20, "timeout": 90}
+
+
+def test_debug_run_captures_the_games_output(debug_proc):
+    """The loop this tool exists for: run it, read what it actually printed.
+
+    The handshake order is load-bearing. Godot withholds the launch response until
+    configurationDone arrives, so sending configurationDone first - which reads as the
+    natural setup order - deadlocks and looks exactly like "launch is unsupported".
+    """
+    proc, _ = debug_proc
+    payload, is_error = proc.call_tool("debug_run", RUN_ARGS)
+
+    assert not is_error, payload
+    assert payload["launched"] is True
+
+    printed = " ".join(str(line.get("text", "")) for line in payload["output"])
+    assert "GODOTLENS_TEST: started" in printed, f"game output not captured: {payload}"
+
+
+def test_debug_run_sees_autoload_state_at_runtime(debug_proc):
+    """Output includes values only the running game knows."""
+    proc, _ = debug_proc
+    payload, is_error = proc.call_tool("debug_run", RUN_ARGS)
+
+    assert not is_error, payload
+    printed = " ".join(str(line.get("text", "")) for line in payload["output"])
+    assert "GODOTLENS_TEST: score is 0" in printed
+
+
+def test_debug_run_reports_the_game_exiting(debug_proc):
+    proc, _ = debug_proc
+    payload, is_error = proc.call_tool("debug_run", RUN_ARGS)
+
+    assert not is_error, payload
+    assert payload["exited"] is True, f"expected the probe scene to quit: {payload}"
+    assert "terminated" in payload["events"] or "exited" in payload["events"]
+
+
+def test_debug_run_then_output_is_drained(debug_proc):
+    """debug_run consumes what it collected, so a following debug_output is fresh."""
+    proc, _ = debug_proc
+    first, is_error = proc.call_tool("debug_run", RUN_ARGS)
+    assert not is_error, first
+    assert first["output_lines"] > 0
+
+    second, is_error = proc.call_tool("debug_output", {"wait": 1.0})
+    assert not is_error, second
+    assert second["count"] == 0, "output was returned twice"

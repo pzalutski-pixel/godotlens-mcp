@@ -798,6 +798,42 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
+    {
+        "name": "debug_run",
+        "description": (
+            "Run the project and collect what it prints. "
+            "Returns: captured stdout/stderr, whether the game exited, and any stop reason. "
+            "THIS CLOSES THE LOOP: edit, sync, run, and read the actual behaviour, without "
+            "the developer pressing F5 or pasting console output back. "
+            "The game runs in the Godot editor that is already open. "
+            "Set breakpoints with debug_set_breakpoints BEFORE calling this if you want "
+            "execution to pause. Long-running games keep going - use debug_output to keep "
+            "reading and debug_terminate to stop."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scene": {
+                    "type": "string",
+                    "description": ("Which scene to run: 'main' (default), 'current', "
+                                    "'pinned', or a res:// path"),
+                },
+                "collect": {
+                    "type": "number",
+                    "description": "Seconds to collect output before returning (default 10)",
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Seconds to wait for the game to start (default 60)",
+                },
+            },
+            "required": [],
+        },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": False, "openWorldHint": False,
+        },
+    },
 ]
 
 
@@ -1258,6 +1294,29 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 await _dap.step_over(int(arguments.get("thread_id", 1)))
                 await _dap.drain_events(1.0)
                 result = {"stepped": True, "stopped": _dap.stopped_state}
+
+            elif name == "debug_run":
+                root = find_project_root()
+                body = await _dap.launch(
+                    root,
+                    scene=arguments.get("scene"),
+                    timeout=float(arguments.get("timeout", 60.0)))
+                lines = await _dap.collect_output(float(arguments.get("collect", 10.0)))
+                result = {
+                    "launched": True,
+                    "project": root,
+                    "output": lines,
+                    "output_lines": len(lines),
+                    "exited": _dap.terminated,
+                    "stopped": _dap.stopped_state,
+                    "events": [e["event"] for e in _dap.events],
+                    "launch_body": body,
+                }
+                if not _dap.terminated and not _dap.stopped_state:
+                    result["note"] = (
+                        "The game is still running. Call debug_output for more, "
+                        "debug_stack_trace if it hits a breakpoint, or debug_terminate to stop it."
+                    )
 
             elif name == "debug_terminate":
                 await _dap.terminate()

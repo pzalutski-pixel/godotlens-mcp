@@ -162,6 +162,7 @@ debugger can tell you what it actually **did**.
 
 | Tool | Description |
 |------|-------------|
+| `debug_run` | **Run the project and return what it printed.** Closes the loop: edit, sync, run, read the actual behaviour — no F5, no pasting console output back. |
 | `debug_status` | Adapter connection, capabilities, and whether the game is running or paused. |
 | `debug_output` | Console output from the running game — `print`, stdout, stderr, and runtime errors with their source location. Drained on each call. |
 | `debug_set_breakpoints` | Set breakpoints in a file (0-based lines, converted to DAP's 1-based on the wire). |
@@ -171,9 +172,13 @@ debugger can tell you what it actually **did**.
 | `debug_continue` / `debug_pause` / `debug_step_over` | Execution control. |
 | `debug_terminate` | Stop the running game. |
 
-Measured on Godot 4.7.1: the adapter runs headless and answers `setBreakpoints`,
-`threads`, `stackTrace`, `scopes` and execution control. **Launching a game requires a
-non-headless editor** — a headless editor has no display driver to run one.
+Measured on Godot 4.7.1, including headless — so this works in CI as well as beside an
+open editor.
+
+One implementation note worth recording, because it cost time: Godot does not answer
+the DAP `launch` request until `configurationDone` arrives. Sending `configurationDone`
+first, which is how the DAP setup sequence usually reads, deadlocks and is
+indistinguishable from `launch` being unsupported.
 
 ### Synchronization
 
