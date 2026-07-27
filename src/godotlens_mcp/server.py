@@ -19,6 +19,12 @@ from godotlens_mcp.lsp_client import (
     file_uri,
     find_project_root,
 )
+from godotlens_mcp.scene import (
+    GodotBinaryNotFound,
+    collect_scripts,
+    dump_scenes,
+    validate_scene,
+)
 
 _lsp: LSPClient | None = None
 
@@ -519,6 +525,57 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
+    # Scene inspection (runs Godot itself; the LSP cannot see .tscn at all)
+    {
+        "name": "scene_state",
+        "description": (
+            "Get Godot's own resolved view of a scene: node tree with types, script "
+            "attachments, unique_name_in_owner flags, exported property values, and the "
+            "signal connections declared in the scene. "
+            "Godot's LSP reads .gd files only, so NONE of this is visible to "
+            "gdscript_references or gdscript_rename. "
+            "Runs the engine to resolve the scene, so inherited scenes and instanced "
+            "children are resolved the way Godot actually instantiates them. "
+            "Requires a Godot binary (GODOT_BIN or ./godot/)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Scene paths, res:// or filesystem",
+                },
+            },
+            "required": ["files"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "scene_validate",
+        "description": (
+            "Check that a scene's signal connections still point at methods that exist. "
+            "Returns: per-scene problems - missing handler methods, targets with no "
+            "script, and connections aimed at nodes that are not in the scene. "
+            "WHEN TO CALL: after editing a .tscn, or after renaming or removing a "
+            "signal handler in GDScript. "
+            "Connections are stored as unvalidated STRINGS, so a stale one produces no "
+            "compile error and fails only when the signal fires at runtime. "
+            "Handler existence is checked against the LSP's parse of the attached script."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Scene paths, res:// or filesystem",
+                },
+            },
+            "required": ["files"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
 ]
 
 
@@ -529,6 +586,27 @@ TOOLS = [
 async def ensure_connected() -> tuple[bool, str]:
     """Ensure LSP is connected, return (ok, error_message)."""
     return await _lsp.connect()
+
+
+def _res_to_disk(res_path: str, project_root: str) -> str:
+    """res://scripts/player.gd -> <project>/scripts/player.gd"""
+    if res_path.startswith("res://"):
+        return os.path.join(project_root, res_path[len("res://"):].replace("/", os.sep))
+    return res_path
+
+
+def _symbol_names(symbols: Any) -> set[str]:
+    """Flatten a documentSymbol tree to a set of names."""
+    found: set[str] = set()
+
+    def walk(nodes: Any) -> None:
+        for node in nodes or []:
+            if isinstance(node, dict):
+                found.add(node.get("name", ""))
+                walk(node.get("children"))
+
+    walk(symbols)
+    return found
 
 
 def _native_name(entry: Any) -> str:
@@ -601,6 +679,11 @@ async def _scan_scenes_for_symbol(symbol: str) -> list[dict]:
         return hits
 
     return await asyncio.get_event_loop().run_in_executor(None, _scan)
+
+
+async def _exists(path: str) -> bool:
+    """Filesystem check off the event loop."""
+    return await asyncio.get_event_loop().run_in_executor(None, os.path.isfile, path)
 
 
 async def read_text_file(path: str) -> str:
@@ -785,6 +868,32 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                     "line": h.get("range", {}).get("start", {}).get("line", 0),
                     "char": h.get("range", {}).get("start", {}).get("character", 0),
                 } for h in hits or []]
+
+        elif name == "scene_state":
+            root = find_project_root()
+            dump = await dump_scenes(arguments["files"], root)
+            result = dump
+
+        elif name == "scene_validate":
+            root = find_project_root()
+            dump = await dump_scenes(arguments["files"], root)
+            report = {}
+            for res_path, scene in (dump.get("scenes") or {}).items():
+                # Ask the LSP which functions each attached script really has, so the
+                # check is against Godot's parse rather than our own reading.
+                symbols: dict[str, set[str]] = {}
+                for script_res in collect_scripts(scene):
+                    disk_path = _res_to_disk(script_res, root)
+                    if not await _exists(disk_path):
+                        continue
+                    try:
+                        tree = await _lsp.request("textDocument/documentSymbol", {
+                            "textDocument": {"uri": file_uri(disk_path)}})
+                        symbols[script_res] = _symbol_names(tree)
+                    except LSPError:
+                        continue
+                report[res_path] = validate_scene(scene, symbols)
+            result = {"scenes": report, "errors": dump.get("errors") or {}}
 
         elif name == "gdscript_validate":
             # Check proposed content WITHOUT writing it to disk, so a broken edit is
@@ -976,6 +1085,12 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
 
     except UnsupportedPathError as e:
         return tool_result(json.dumps({"error": str(e), "kind": "unsupported_path"}), is_error=True)
+
+    except GodotBinaryNotFound as e:
+        return tool_result(json.dumps({"error": str(e), "kind": "godot_binary_missing"}), is_error=True)
+
+    except TimeoutError as e:
+        return tool_result(json.dumps({"error": str(e), "kind": "godot_timeout"}), is_error=True)
 
     except (LSPConnectionLost, LSPTimeout) as e:
         # Genuine transport failure — drop the socket so the next call reconnects.
