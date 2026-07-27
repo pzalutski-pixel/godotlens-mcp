@@ -5,7 +5,8 @@
 [![PyPI](https://img.shields.io/pypi/v/godotlens-mcp)](https://pypi.org/project/godotlens-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An MCP server providing 15 semantic analysis tools for GDScript, powered by Godot's built-in Language Server.
+An MCP server that gives AI agents Godot's own view of a GDScript project — navigation,
+diagnostics, engine API, and scene verification — powered by Godot's built-in Language Server.
 
 ## Built for AI Agents
 
@@ -13,17 +14,34 @@ AI coding agents work with text files but lack semantic understanding of GDScrip
 
 GodotLens bridges this gap by exposing Godot's built-in Language Server through the Model Context Protocol (MCP), giving AI agents compiler-accurate code intelligence for GDScript — go to definition, find references, diagnostics, rename, and more.
 
-**Example:** Finding all usages of `_on_player_hit`:
+**Example**, measured against Godot 4.7.1 on a project where `take_damage` is defined in
+`player.gd`, called twice from `enemy.gd`, once from `player.gd` itself, and mentioned in a
+comment:
 
 | Approach | Result |
 |----------|--------|
-| `grep "_on_player_hit"` | 12 matches including comments, strings, and similarly named functions |
-| `gdscript_references` | Exactly 4 call sites where `_on_player_hit` is invoked |
+| `grep "take_damage"` | 5 matches, including the comment |
+| `gdscript_references` | Exactly 4 real call sites; the comment is not among them |
+
+### What the LSP cannot see
+
+Godot's reference search reads `.gd` files only. A signal handler wired in a `.tscn`
+`[connection]` block is invisible to it, so renaming that handler leaves the scene pointing at a
+method that no longer exists — and that fails at runtime with no compile error anywhere. This is
+why `scene_state` and `scene_validate` exist, and why `gdscript_rename` warns when a name also
+appears in scene files.
 
 ## Prerequisites
 
-- **Godot 4.x** editor must be **running** with your project open — Godot's LSP server starts automatically when the editor opens a project
+- **Godot 4.6+** running with your project open — the LSP starts automatically when the editor
+  opens a project. Older 4.x releases are refused rather than silently misread: behaviour changed
+  materially at 4.5 (URI encoding) and 4.6 (document ownership).
 - **Python 3.10+** (for pip install) or **Node.js 16+** (for npx)
+- A Godot **binary** for the `scene_*` tools, which run the engine to resolve scenes. Found via
+  `GODOT_BIN`, a `./godot/` directory, or `PATH`.
+
+> The editor does not need a window. `godot --path <project> --editor --headless --lsp-port 6005`
+> serves the LSP with no GUI, which is what the integration tests use in CI.
 
 ## Quick Start
 
@@ -65,54 +83,80 @@ pip install godotlens-mcp
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `GODOT_LSP_HOST` | `127.0.0.1` | Godot LSP server host |
-| `GODOT_LSP_PORT` | `6005` | Godot LSP server port |
+| `GODOT_LSP_PORT` | `6005` | Godot LSP server port. The official VS Code extension defaults to `6008` |
+| `GODOT_LSP_TIMEOUT` | `15` | Seconds to wait for any single LSP response |
+| `GODOT_DIAGNOSTICS_TIMEOUT` | `8` | Seconds to wait for Godot to publish diagnostics after a sync |
+| `GODOT_PROJECT_ROOT` | auto | Project root. Auto-detected by walking up for `project.godot` |
+| `GODOT_BIN` | auto | Godot executable, required by the `scene_*` tools |
+| `GODOT_VERSION` | auto | Override capability detection |
 
 ## Tools
+
+All line and character parameters are **0-indexed**, matching the LSP specification.
 
 ### Health
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_status` | Check connection to Godot LSP. Use to verify editor is running before other tools. |
+| `gdscript_status` | Check the connection to Godot. Use first if anything is behaving oddly. |
 
-### Navigation (6 tools)
+### Navigation
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_definition` | Navigate to where a symbol is defined. Returns file path and line number. |
-| `gdscript_declaration` | Navigate to the declaration site of a symbol. |
-| `gdscript_references` | Find all references to a symbol across the project. Essential for impact analysis before refactoring. |
-| `gdscript_hover` | Get type information and documentation for a symbol. Use to understand types and return values. |
-| `gdscript_symbols` | List all symbols (classes, functions, variables, signals) in a file. Use to explore file structure. |
-| `gdscript_signature_help` | Get function signature and parameter info at a call site. |
+| `gdscript_definition` | Where a symbol is defined. |
+| `gdscript_references` | Every reference project-wide. On Godot 4.6+ this reparses every `.gd` file, so it is not cheap. |
+| `gdscript_references_in_file` | Occurrences within one file, via `documentHighlight`. Much cheaper. Godot 4.7+. |
+| `gdscript_hover` | Type information and documentation for a symbol. |
+| `gdscript_symbols` | The symbol tree of a file. |
+| `gdscript_signature_help` | Parameter info at a call site. |
+
+### Authoring
+
+| Tool | Description |
+|------|-------------|
+| `gdscript_engine_api` | Authoritative signatures and docs for an engine class or member, from the exact build in use. Use this instead of recalling Godot's API. |
+| `gdscript_complete` | Valid completions at a position. The only **scene-aware** query: includes real `$NodePath` entries and the signals actually on the owning node. |
+| `gdscript_validate` | Check proposed content for errors **without writing it to disk**. |
 
 ### Refactoring
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_rename` | Rename a symbol across all files. Workflow: references to preview impact, rename, then sync. |
+| `gdscript_rename` | Rename a symbol. Refuses when Godot will not rename it, and warns when the name also appears in scene files it cannot update. |
 
-### Synchronization (3 tools)
+### Scenes
 
-| Tool | Description |
-|------|-------------|
-| `gdscript_sync_file` | Sync a modified file with the LSP and get updated diagnostics. Call after editing .gd files. |
-| `gdscript_sync_files` | Batch sync multiple modified files. More efficient than syncing individually. |
-| `gdscript_delete_file` | Notify LSP a file was deleted. Clears stale diagnostics. |
-
-### Batch Operations (3 tools)
+These run the Godot binary to resolve a scene the way the engine does, including
+inherited scenes. They do not parse `.tscn` as text.
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_symbols_batch` | Get symbols from multiple files in one call. |
-| `gdscript_definitions_batch` | Get definitions for multiple positions in one call. |
-| `gdscript_references_batch` | Find references for multiple symbols in one call. Use for bulk impact analysis. |
+| `scene_state` | Node tree, types, script attachments, `unique_name_in_owner` flags, exported values, and signal connections. |
+| `scene_validate` | Verifies each connection points at a method that exists. Connections are unvalidated strings, so a stale one fails only at runtime. |
 
-### Diagnostics
+### Synchronization
+
+Godot's LSP does not watch the filesystem, so it must be told when a file changes.
 
 | Tool | Description |
 |------|-------------|
-| `gdscript_diagnostics` | Get compiler errors and warnings. Workflow: edit, sync, then diagnostics to verify. |
+| `gdscript_sync_file` | Sync one modified file and get its diagnostics. |
+| `gdscript_sync_files` | Sync several at once. |
+| `gdscript_release_file` | Release a file from the LSP session so it reads from disk again. |
+
+### Diagnostics and batch
+
+| Tool | Description |
+|------|-------------|
+| `gdscript_diagnostics` | Errors and warnings for one or more files. |
+| `gdscript_symbols_batch` | Symbols for several files in one call. |
+| `gdscript_definitions_batch` | Definitions for several positions. |
+| `gdscript_references_batch` | References for several symbols. |
+
+Results carry a `verified` flag where it matters: `true` means Godot checked the file
+and reported back, `false` means it did not answer in time. An empty diagnostics list
+with `verified: false` is **not** a clean bill of health.
 
 ## Architecture
 

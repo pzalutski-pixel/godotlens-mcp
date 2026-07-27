@@ -31,6 +31,20 @@ SCENE = {
 }
 
 
+def test_helper_script_is_packaged():
+    """scene_dump.gd must ship with the package.
+
+    It is the only non-Python file in the distribution, so it is the one most likely
+    to be dropped by a packaging change — and the scene_* tools are dead without it.
+    """
+    from godotlens_mcp.scene import HELPER_SCRIPT
+
+    assert HELPER_SCRIPT.is_file(), f"helper script missing at {HELPER_SCRIPT}"
+    body = HELPER_SCRIPT.read_text(encoding="utf-8")
+    assert "get_connection_method" in body, "helper no longer reports connections"
+    assert "extends SceneTree" in body
+
+
 def test_collect_scripts_dedupes():
     assert collect_scripts(SCENE) == ["res://player.gd"]
 

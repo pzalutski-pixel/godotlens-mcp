@@ -1,0 +1,131 @@
+name: CI
+
+# Runs on every push and PR. Previously tests ran only on a v* tag, so nothing was
+# verified until release day — and only ever on Linux, which is why a bug that made
+# every returned path relative on Linux and macOS went unnoticed.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      # Integration tests need a Godot binary and skip cleanly without one.
+      - run: python -m pytest -q -m "not integration"
+
+  integration:
+    name: integration / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            godot-file: Godot_v4.7.1-stable_linux.x86_64.zip
+            binary: Godot_v4.7.1-stable_linux.x86_64
+          - os: windows-latest
+            godot-file: Godot_v4.7.1-stable_win64.exe.zip
+            binary: Godot_v4.7.1-stable_win64_console.exe
+          - os: macos-latest
+            godot-file: Godot_v4.7.1-stable_macos.universal.zip
+            binary: Godot.app/Contents/MacOS/Godot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e ".[dev]"
+
+      - name: Download Godot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p godot-bin && cd godot-bin
+          url="https://github.com/godotengine/godot/releases/download/4.7.1-stable/${{ matrix.godot-file }}"
+          curl -fL --retry 3 -o godot.zip "$url"
+          unzip -q godot.zip
+          chmod +x "${{ matrix.binary }}" 2>/dev/null || true
+
+      - name: Run integration tests against real Godot
+        shell: bash
+        env:
+          GODOT_BIN: ${{ github.workspace }}/godot-bin/${{ matrix.binary }}
+        run: python -m pytest -q -m integration
+
+  package:
+    name: npm package installs and runs
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # This job exists because the published npm package never worked: the launcher
+      # spawned server/__main__.py while the bundle puts it at
+      # server/godotlens_mcp/__main__.py, and PYTHONPATH was off by the same level.
+      # Six releases shipped broken because nothing ever executed the built artifact.
+      - name: Build the npm bundle exactly as the release workflow does
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p npm/server
+          cp -r src/godotlens_mcp npm/server/godotlens_mcp
+          find npm/server -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Pack and install into a clean directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd npm && npm pack
+          tarball="$(ls godotlens-mcp-*.tgz)"
+          mkdir -p "$RUNNER_TEMP/pkgtest" && cd "$RUNNER_TEMP/pkgtest"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$GITHUB_WORKSPACE/npm/$tarball"
+
+      - name: Execute the installed binary and require a real MCP reply
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/pkgtest"
+          out="$(printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | ./node_modules/.bin/godotlens-mcp)"
+          echo "$out"
+          echo "$out" | grep -q '"serverInfo"' || { echo "no initialize reply"; exit 1; }
+          echo "$out" | grep -q '"gdscript_status"' || { echo "no tools/list reply"; exit 1; }

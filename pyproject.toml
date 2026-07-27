@@ -2,10 +2,15 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+# Single source of truth. pyproject (1.0.5), npm/package.json (1.0.0) and
+# server.json (1.0.2) had all drifted apart.
+path = "src/godotlens_mcp/__init__.py"
+
 [project]
 name = "godotlens-mcp"
-version = "1.0.5"
-description = "MCP server providing 15 AI-optimized tools for GDScript code analysis via Godot's built-in LSP"
+dynamic = ["version"]
+description = "MCP server giving AI agents Godot's own view of a GDScript project: navigation, diagnostics, engine API, and scene verification"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -21,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
+    "Operating System :: OS Independent",
 ]
 dependencies = []
 
