@@ -135,12 +135,20 @@ jobs:
           # Assert on the ARTIFACT, not on package.json's files array. v1.1.0 shipped
           # without LICENSE or NOTICE because the manifest listed them while npm pack
           # could not reach them, and a manifest-only check reported success.
+          # List once into a variable and match in-shell. Piping tar into `grep -q`
+          # makes grep exit on the first match, tar take SIGPIPE, and `set -o pipefail`
+          # report the whole pipeline as failed — so files that were present looked
+          # missing. GNU tar surfaces this as "tar: stdout: write error"; BSD tar on
+          # macOS stays quiet, which is why only Linux and Windows failed.
+          contents="$(tar -tzf "$tarball")"
           echo "--- tarball contents ---"
-          tar -tzf "$tarball"
+          echo "$contents"
           for required in package/LICENSE package/NOTICE package/README.md \
                           package/bin/godotlens-mcp.js package/server/godotlens_mcp/__main__.py; do
-            tar -tzf "$tarball" | grep -qx "$required" \
-              || { echo "::error::$required missing from the npm tarball"; exit 1; }
+            if ! printf '%s\n' "$contents" | grep -Fxq -- "$required"; then
+              echo "::error::$required missing from the npm tarball"
+              exit 1
+            fi
           done
           mkdir -p "$RUNNER_TEMP/pkgtest" && cd "$RUNNER_TEMP/pkgtest"
           npm init -y >/dev/null
