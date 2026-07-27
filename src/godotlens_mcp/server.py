@@ -17,6 +17,7 @@ from godotlens_mcp.lsp_client import (
     compact_location,
     compact_symbol,
     file_uri,
+    find_project_root,
 )
 
 _lsp: LSPClient | None = None
@@ -132,6 +133,7 @@ TOOLS = [
             "If disconnected, start Godot editor with your project open."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     # Navigation
     {
@@ -151,24 +153,7 @@ TOOLS = [
             },
             "required": ["file", "line", "character"],
         },
-    },
-    {
-        "name": "gdscript_declaration",
-        "description": (
-            "Navigate to the declaration of a symbol at a given position. "
-            "Returns: file path and line number of the declaration. "
-            "IMPORTANT: Uses ZERO-BASED coordinates (editor line 1 = pass line 0). "
-            "Similar to gdscript_definition but returns the declaration site."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
-                "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
-                "character": {"type": "integer", "description": "Zero-based character position"},
-            },
-            "required": ["file", "line", "character"],
-        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "gdscript_references",
@@ -187,6 +172,7 @@ TOOLS = [
             },
             "required": ["file", "line", "character"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "gdscript_hover",
@@ -205,6 +191,7 @@ TOOLS = [
             },
             "required": ["file", "line", "character"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "gdscript_symbols",
@@ -221,6 +208,7 @@ TOOLS = [
             },
             "required": ["file"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "gdscript_signature_help",
@@ -239,6 +227,7 @@ TOOLS = [
             },
             "required": ["file", "line", "character"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     # Refactoring
     {
@@ -257,8 +246,18 @@ TOOLS = [
                 "line": {"type": "integer", "description": "Zero-based line number (editor line - 1)"},
                 "character": {"type": "integer", "description": "Zero-based character position"},
                 "new_name": {"type": "string", "description": "New name for the symbol"},
+                "old_name": {
+                    "type": "string",
+                    "description": ("Current name of the symbol. Optional but recommended: "
+                                    "enables scanning .tscn/.tres files for references Godot "
+                                    "cannot see or update."),
+                },
             },
             "required": ["file", "line", "character", "new_name"],
+        },
+        "annotations": {
+            "readOnlyHint": True, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
         },
     },
     # Sync operations
@@ -282,6 +281,10 @@ TOOLS = [
             },
             "required": ["file"],
         },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
+        },
     },
     {
         "name": "gdscript_sync_files",
@@ -303,6 +306,10 @@ TOOLS = [
             },
             "required": ["files"],
         },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
+        },
     },
     {
         "name": "gdscript_release_file",
@@ -321,6 +328,10 @@ TOOLS = [
                 "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
             },
             "required": ["file"],
+        },
+        "annotations": {
+            "readOnlyHint": False, "destructiveHint": False,
+            "idempotentHint": True, "openWorldHint": False,
         },
     },
     # Batch operations
@@ -343,6 +354,7 @@ TOOLS = [
             },
             "required": ["files"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "gdscript_definitions_batch",
@@ -371,6 +383,7 @@ TOOLS = [
             },
             "required": ["positions"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "gdscript_references_batch",
@@ -400,6 +413,7 @@ TOOLS = [
             },
             "required": ["positions"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "gdscript_diagnostics",
@@ -421,6 +435,89 @@ TOOLS = [
             },
             "required": ["files"],
         },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    # Engine API and authoring
+    {
+        "name": "gdscript_engine_api",
+        "description": (
+            "Get authoritative documentation for a Godot ENGINE class or member, from the "
+            "exact editor build in use. "
+            "Returns: signature with argument names, types and defaults, plus documentation. "
+            "USE THIS instead of recalling Godot's API from memory - it is the ground truth "
+            "for the user's version and prevents inventing methods that do not exist. "
+            "Pass 'member' for a specific method/property/signal; omit it to check a class exists."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "class_name": {"type": "string", "description": "Engine class, e.g. CharacterBody2D"},
+                "member": {"type": "string", "description": "Method, property or signal name"},
+            },
+            "required": ["class_name"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "gdscript_complete",
+        "description": (
+            "Get valid completions at a cursor position, from Godot's own completion engine. "
+            "Returns: candidate labels with kind and detail. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "This is the only SCENE-AWARE query available: Godot resolves the scene that owns "
+            "this script and completes against the real node, so $NodePath entries and the "
+            "signals actually present on that node are included. No analysis of the .gd file "
+            "alone can reproduce that."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
+                "limit": {"type": "integer", "description": "Max items to return (default 100)"},
+            },
+            "required": ["file", "line", "character"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "gdscript_validate",
+        "description": (
+            "Check proposed file content for errors WITHOUT writing it to disk. "
+            "Returns: valid flag, errors and warnings. "
+            "WHEN TO CALL: before writing an edit, so broken code never reaches the project. "
+            "The LSP is restored to the on-disk content afterwards."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Path the content is intended for"},
+                "content": {"type": "string", "description": "Full proposed file content"},
+            },
+            "required": ["file", "content"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "gdscript_references_in_file",
+        "description": (
+            "Find occurrences of a symbol within ONE file. "
+            "Returns: list of line/char positions. "
+            "IMPORTANT: Uses ZERO-BASED coordinates. "
+            "Much cheaper than gdscript_references, which reparses every .gd file in the "
+            "project on Godot 4.6+. Requires Godot 4.7+; reports unsupported otherwise."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Absolute or relative path to the .gd file"},
+                "line": {"type": "integer", "description": "Zero-based line number"},
+                "character": {"type": "integer", "description": "Zero-based character position"},
+            },
+            "required": ["file", "line", "character"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
 ]
 
@@ -432,6 +529,78 @@ TOOLS = [
 async def ensure_connected() -> tuple[bool, str]:
     """Ensure LSP is connected, return (ok, error_message)."""
     return await _lsp.connect()
+
+
+def _native_name(entry: Any) -> str:
+    """Class name from a gdscript/capabilities native_classes entry."""
+    if isinstance(entry, dict):
+        return entry.get("name") or entry.get("native_class") or ""
+    return str(entry)
+
+
+def _compact_completions(items: Any, limit: int) -> dict:
+    """Strip completion items down to what an agent can act on.
+
+    Godot echoes the full request context back in a per-item ``data`` blob — the
+    document URI, the position, the trigger — on every single item. Left in, a
+    few hundred completions bury the agent's context window in noise.
+    """
+    raw = items.get("items", []) if isinstance(items, dict) else (items or [])
+    compact = []
+    for item in raw[:limit]:
+        entry = {"label": item.get("label", ""), "kind": item.get("kind", 0)}
+        insert = item.get("insertText")
+        if insert and insert != entry["label"]:
+            entry["insert"] = insert
+        detail = item.get("detail")
+        if detail:
+            entry["detail"] = detail
+        compact.append(entry)
+    return {"items": compact, "returned": len(compact), "total": len(raw),
+            "truncated": len(raw) > len(compact)}
+
+
+async def _ensure_document_open(uri: str, file_path: str) -> None:
+    """Godot resolves completion/highlight against its cached document."""
+    if not _lsp.is_open(uri):
+        await _lsp.sync_document(uri, await read_text_file(file_path), notify_save=False)
+
+
+async def _scan_scenes_for_symbol(symbol: str) -> list[dict]:
+    """Find a name inside project scene/resource files.
+
+    Godot's find_all_usages collects .gd files only, so anything named from a .tscn —
+    most importantly [connection method="..."] — is invisible to references and rename.
+    This is a plain text scan, deliberately reported separately from LSP results so the
+    provenance stays obvious.
+    """
+    if not symbol:
+        return []
+
+    root = find_project_root()
+
+    def _scan() -> list[dict]:
+        hits: list[dict] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in {".godot", ".git", "node_modules"}]
+            for filename in filenames:
+                if not filename.endswith((".tscn", ".tres")):
+                    continue
+                full = os.path.join(dirpath, filename)
+                try:
+                    with open(full, encoding="utf-8", errors="replace") as handle:
+                        for lineno, text in enumerate(handle):
+                            if symbol in text:
+                                hits.append({
+                                    "file": full.replace("\\", "/"),
+                                    "line": lineno,
+                                    "text": text.strip()[:200],
+                                })
+                except OSError:
+                    continue
+        return hits
+
+    return await asyncio.get_event_loop().run_in_executor(None, _scan)
 
 
 async def read_text_file(path: str) -> str:
@@ -488,14 +657,6 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             if result:
                 result = _compact_locations(result)
 
-        elif name == "gdscript_declaration":
-            result = await _lsp.request("textDocument/declaration", {
-                "textDocument": {"uri": file_uri(arguments["file"])},
-                "position": {"line": arguments["line"], "character": arguments["character"]}
-            })
-            if result:
-                result = _compact_locations(result)
-
         elif name == "gdscript_references":
             result = await _lsp.request("textDocument/references", {
                 "textDocument": {"uri": file_uri(arguments["file"])},
@@ -531,11 +692,132 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             })
 
         elif name == "gdscript_rename":
-            result = await _lsp.request("textDocument/rename", {
-                "textDocument": {"uri": file_uri(arguments["file"])},
+            uri = file_uri(arguments["file"])
+            position = {"line": arguments["line"], "character": arguments["character"]}
+
+            # prepareRename first: GDScriptWorkspace::rename declares an empty
+            # WorkspaceEdit and fills it only when is_valid_rename_target() passes, then
+            # returns it unconditionally. A built-in, an unresolvable symbol, and a
+            # symbol with no usages all come back as a well-formed {"changes": {}} —
+            # indistinguishable from success. prepareRename returns null on refusal.
+            can_rename = await _lsp.request("textDocument/prepareRename", {
+                "textDocument": {"uri": uri}, "position": position})
+            if can_rename is None:
+                result = {
+                    "renamed": False,
+                    "reason": "not_renameable",
+                    "detail": ("Godot will not rename this symbol. It is likely an engine "
+                               "built-in, or the position does not resolve to a symbol "
+                               "defined in project source."),
+                }
+            else:
+                edit = await _lsp.request("textDocument/rename", {
+                    "textDocument": {"uri": uri}, "position": position,
+                    "newName": arguments["new_name"]})
+                changes = (edit or {}).get("changes") or {}
+                result = {
+                    "renamed": bool(changes),
+                    "changes": changes,
+                    "files_affected": len(changes),
+                }
+                if not changes:
+                    result["reason"] = "no_usages_found"
+                # Godot's find_all_usages only walks .gd files, so a method named in a
+                # .tscn [connection] block keeps the old name and breaks at runtime
+                # with no compile error anywhere.
+                scene_hits = await _scan_scenes_for_symbol(arguments.get("old_name") or "")
+                if scene_hits:
+                    result["scene_references"] = scene_hits
+                    result["warning"] = (
+                        "This name also appears in scene files, which Godot's rename "
+                        "cannot update. Edit them yourself or the connection will break "
+                        "at runtime with no compile error."
+                    )
+
+        elif name == "gdscript_engine_api":
+            class_name = arguments["class_name"]
+            member = arguments.get("member")
+            if member:
+                result = await _lsp.request("textDocument/nativeSymbol", {
+                    "native_class": class_name, "symbol_name": member})
+                if result is None:
+                    result = {"found": False, "class_name": class_name, "member": member}
+            else:
+                # An empty symbol_name returns the class AND every child, which for
+                # Node or Control is enormous. Serve the index from the capabilities
+                # push instead, and make the caller name a member for detail.
+                natives = _lsp.native_capabilities.get("native_classes") or []
+                match = next((c for c in natives if _native_name(c) == class_name), None)
+                result = {
+                    "found": match is not None,
+                    "class_name": class_name,
+                    "detail": match,
+                    "hint": "Pass 'member' for the full signature and documentation.",
+                }
+
+        elif name == "gdscript_complete":
+            uri = file_uri(arguments["file"])
+            await _ensure_document_open(uri, arguments["file"])
+            items = await _lsp.request("textDocument/completion", {
+                "textDocument": {"uri": uri},
                 "position": {"line": arguments["line"], "character": arguments["character"]},
-                "newName": arguments["new_name"]
+                # 4.4/4.5 load CompletionContext unguarded; omitting it silently
+                # overwrites the struct default, so always send one.
+                "context": {"triggerKind": 1, "triggerCharacter": ""},
             })
+            limit = int(arguments.get("limit", 100))
+            result = _compact_completions(items, limit)
+
+        elif name == "gdscript_references_in_file":
+            if not _lsp.capabilities.has_document_highlight:
+                result = {
+                    "supported": False,
+                    "reason": "documentHighlight requires Godot 4.7 or newer.",
+                    "alternative": "gdscript_references (project-wide, slower)",
+                }
+            else:
+                uri = file_uri(arguments["file"])
+                await _ensure_document_open(uri, arguments["file"])
+                hits = await _lsp.request("textDocument/documentHighlight", {
+                    "textDocument": {"uri": uri},
+                    "position": {"line": arguments["line"], "character": arguments["character"]}})
+                result = [{
+                    "line": h.get("range", {}).get("start", {}).get("line", 0),
+                    "char": h.get("range", {}).get("start", {}).get("character", 0),
+                } for h in hits or []]
+
+        elif name == "gdscript_validate":
+            # Check proposed content WITHOUT writing it to disk, so a broken edit is
+            # caught before it lands in the project.
+            file_path = arguments["file"]
+            uri = file_uri(file_path)
+            key = canonical_key(file_path)
+            original = None
+            if _lsp.is_open(uri):
+                try:
+                    original = await read_text_file(file_path)
+                except OSError:
+                    original = None
+
+            _lsp.diagnostics_cache.pop(key, None)
+            await _lsp.sync_document(uri, arguments["content"], notify_save=False)
+            missing = await _lsp.wait_for_diagnostics([key], timeout=DIAGNOSTICS_TIMEOUT)
+            diagnostics = _compact_diagnostics(_lsp.diagnostics_cache.get(key, []))
+
+            # Put the LSP back on the real file so a rejected draft is not left behind.
+            if original is not None:
+                _lsp.diagnostics_cache.pop(key, None)
+                await _lsp.sync_document(uri, original, notify_save=False)
+
+            result = {
+                "file": file_path,
+                "valid": bool(not diagnostics and not missing),
+                "verified": not missing,
+                "errors": [d for d in diagnostics if d["severity"] == 1],
+                "warnings": [d for d in diagnostics if d["severity"] == 2],
+            }
+            if missing:
+                result["warning"] = "Godot did not report back; this is not a clean bill of health."
 
         # Sync operations
         elif name == "gdscript_sync_file":

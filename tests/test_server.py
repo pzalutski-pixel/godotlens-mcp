@@ -25,7 +25,7 @@ from godotlens_mcp.server import (
 # ---------------------------------------------------------------------------
 
 def test_list_tools_count():
-    assert len(TOOLS) == 15
+    assert len(TOOLS) == 18
 
 
 def test_list_tools_names():
@@ -33,7 +33,6 @@ def test_list_tools_names():
     expected = {
         "gdscript_status",
         "gdscript_definition",
-        "gdscript_declaration",
         "gdscript_references",
         "gdscript_hover",
         "gdscript_symbols",
@@ -46,6 +45,10 @@ def test_list_tools_names():
         "gdscript_definitions_batch",
         "gdscript_references_batch",
         "gdscript_diagnostics",
+        "gdscript_engine_api",
+        "gdscript_complete",
+        "gdscript_validate",
+        "gdscript_references_in_file",
     }
     assert names == expected
 
@@ -54,6 +57,24 @@ def test_all_tools_have_input_schema():
     for tool in TOOLS:
         assert "inputSchema" in tool, f"Tool {tool['name']} missing inputSchema"
         assert tool["inputSchema"]["type"] == "object"
+
+
+def test_all_tools_declare_annotations():
+    """The MCP schema defaults destructiveHint and openWorldHint to TRUE.
+
+    Staying silent means a client must assume gdscript_hover might destroy something,
+    which costs the user an approval prompt on every read.
+    """
+    for tool in TOOLS:
+        assert "annotations" in tool, f"Tool {tool['name']} has no annotations"
+        assert tool["annotations"].get("openWorldHint") is False
+
+
+def test_declaration_tool_is_gone():
+    """gdscript_declaration ran the identical find_symbols() call as definition, and on
+    engine built-ins could call window_move_to_foreground(), pulling the user's editor
+    window in front of whatever they were doing."""
+    assert "gdscript_declaration" not in {t["name"] for t in TOOLS}
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +125,7 @@ async def test_tools_list_response():
     msg = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     resp = await handle_request(msg)
     tools = resp["result"]["tools"]
-    assert len(tools) == 15
+    assert len(tools) == 18
     assert tools[0]["name"] == "gdscript_status"
 
 
@@ -412,4 +433,4 @@ def test_stdio_integration_initialize_and_tools_list():
 
     tools_response = json.loads(lines[1])
     assert tools_response["id"] == 2
-    assert len(tools_response["result"]["tools"]) == 15
+    assert len(tools_response["result"]["tools"]) == 18
