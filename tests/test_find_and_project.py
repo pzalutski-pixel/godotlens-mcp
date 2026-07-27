@@ -185,3 +185,30 @@ def test_a_typo_is_visibly_absent(proc):
 
     assert "jump" in actions
     assert "jmup" not in actions
+
+
+def test_find_reports_when_it_hits_the_file_cap(proc):
+    """A common name can match hundreds of files, each costing an LSP round trip.
+
+    The cap must be visible in the response — a silently truncated search reads as a
+    complete one, which is worse than being slow.
+    """
+    process, _ = proc
+    payload, is_error = process.call_tool(
+        "gdscript_find", {"name": "extends", "max_files": 1})
+
+    assert not is_error, payload
+    assert payload["searched_files"] <= 1
+    if payload["candidate_files"] > 1:
+        assert payload["truncated"] is True
+        assert "max_files" in payload["warning"]
+
+
+def test_find_does_not_flag_truncation_when_it_searched_everything(proc):
+    process, _ = proc
+    payload, is_error = process.call_tool(
+        "gdscript_find", {"name": "take_damage", "file": "player.gd"})
+
+    assert not is_error, payload
+    assert "truncated" not in payload
+    assert payload["searched_files"] == payload["candidate_files"]

@@ -230,6 +230,7 @@ package has **zero runtime dependencies** and the npm bundle is a handful of `.p
 | `GODOT_LSP_TIMEOUT` | `15` | Seconds to wait for a single language server response |
 | `GODOT_DIAGNOSTICS_TIMEOUT` | `8` | Seconds to wait for diagnostics after a sync |
 | `GODOT_VERSION` | auto | Override capability detection |
+| `GODOT_FIND_FILE_LIMIT` | `60` | Max files `gdscript_find` inspects when searching the whole project |
 
 ## Contributing
 

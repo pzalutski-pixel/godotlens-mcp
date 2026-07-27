@@ -90,6 +90,7 @@ Godot never reported back — **not** that the file is clean.
 | `GODOT_LSP_TIMEOUT` | `15` | Seconds to wait for any single LSP response |
 | `GODOT_DIAGNOSTICS_TIMEOUT` | `8` | Seconds to wait for diagnostics after a sync |
 | `GODOT_VERSION` | auto | Override capability detection |
+| `GODOT_FIND_FILE_LIMIT` | `60` | Max files `gdscript_find` inspects when searching the whole project |
 
 ## Documentation
 

@@ -49,6 +49,11 @@ DIAGNOSTICS_TIMEOUT = float(os.environ.get("GODOT_DIAGNOSTICS_TIMEOUT", "8.0"))
 DAP_PORT = int(os.environ.get("GODOT_DAP_PORT", "6006"))
 DAP_HOST = os.environ.get("GODOT_DAP_HOST", "127.0.0.1")
 
+# gdscript_find issues one documentSymbol request per candidate file, serially. A
+# common name can match hundreds of files, so cap the fan-out rather than block the
+# server for minutes; callers are told when the cap applied.
+FIND_FILE_LIMIT = int(os.environ.get("GODOT_FIND_FILE_LIMIT", "60"))
+
 SERVER_INSTRUCTIONS = (
     "GodotLens exposes Godot's own language server, so answers reflect how Godot "
     "compiles the project rather than a text search.\n"
@@ -778,6 +783,11 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Also return every reference to the first declaration found",
                 },
+                "max_files": {
+                    "type": "integer",
+                    "description": ("Cap on files inspected when searching the whole project "
+                                    "(default 60). The response reports when the cap applied."),
+                },
             },
             "required": ["name"],
         },
@@ -1333,8 +1343,16 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             else:
                 candidates = await _files_mentioning(wanted, await _list_project_scripts(root))
 
+            # Each candidate costs one documentSymbol round trip, issued serially. A
+            # common name like "_ready" can appear in hundreds of files, which would
+            # block the whole server for minutes. Cap it, and say so rather than
+            # quietly returning a partial answer that looks complete.
+            limit = int(arguments.get("max_files", FIND_FILE_LIMIT))
+            truncated = len(candidates) > limit
+            searched = candidates[:limit]
+
             declarations = []
-            for path in candidates:
+            for path in searched:
                 try:
                     tree = await _lsp.request("textDocument/documentSymbol", {
                         "textDocument": {"uri": file_uri(path)}})
@@ -1347,8 +1365,16 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 "name": wanted,
                 "declarations": declarations,
                 "count": len(declarations),
-                "searched_files": len(candidates),
+                "searched_files": len(searched),
+                "candidate_files": len(candidates),
             }
+            if truncated:
+                result["truncated"] = True
+                result["warning"] = (
+                    f"{len(candidates)} files mention '{wanted}'; only the first {limit} "
+                    "were checked. Results may be incomplete — narrow with 'file', or "
+                    "raise 'max_files'."
+                )
             if not declarations:
                 result["hint"] = (
                     "No declaration found. The name may be a local variable, a parameter, "
