@@ -104,8 +104,14 @@ All line and character parameters are **0-indexed**, matching the LSP specificat
 
 ### Navigation
 
+Start with `gdscript_find` when you know a name but not where it is — the position it
+returns feeds directly into every position-based tool below. Guessing a character
+offset and landing one column off returns an empty result that looks exactly like
+"no such symbol".
+
 | Tool | Description |
 |------|-------------|
+| `gdscript_find` | Locate a symbol's declaration **by name**. Returns file, line and character, resolved by the language server rather than by text matching. |
 | `gdscript_definition` | Where a symbol is defined. |
 | `gdscript_references` | Every reference project-wide. On Godot 4.6+ this reparses every `.gd` file, so it is not cheap. |
 | `gdscript_references_in_file` | Occurrences within one file, via `documentHighlight`. Much cheaper. Godot 4.7+. |
@@ -126,6 +132,17 @@ All line and character parameters are **0-indexed**, matching the LSP specificat
 | Tool | Description |
 |------|-------------|
 | `gdscript_rename` | Rename a symbol. Refuses when Godot will not rename it, and warns when the name also appears in scene files it cannot update. |
+
+### Project
+
+| Tool | Description |
+|------|-------------|
+| `project_config` | Autoload singletons, input action names, `class_name` globals, and the main scene, resolved through `ProjectSettings`. |
+
+Autoload and input action names are bare strings where they are used —
+`GameState.add_score(1)`, `Input.is_action_pressed("jump")` — and **nothing validates
+them**. Not the compiler, not the language server, not scene validation. A typo is a
+silent runtime no-op, so check names here before writing them.
 
 ### Scenes
 

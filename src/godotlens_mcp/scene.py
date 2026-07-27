@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 
 HELPER_SCRIPT = Path(__file__).with_name("scene_dump.gd")
+PROJECT_HELPER_SCRIPT = Path(__file__).with_name("project_dump.gd")
 
 
 class GodotBinaryNotFound(RuntimeError):
@@ -100,7 +101,52 @@ async def dump_scenes(paths: list[str], project_root: str, timeout: float = 90.0
     return payload
 
 
-def _extract_json(text: str) -> dict | None:
+async def dump_project(project_root: str, timeout: float = 90.0) -> dict:
+    """Ask Godot for its resolved project configuration.
+
+    Autoload and input-action names are bare strings at the point of use and nothing
+    validates them, so a typo is a silent runtime no-op. ProjectSettings is queried
+    rather than project.godot being read, so defaults and feature-tagged overrides
+    resolve the way the engine resolves them.
+    """
+    payload = await _run_helper(PROJECT_HELPER_SCRIPT, [], project_root, timeout,
+                                marker="autoloads")
+    return payload
+
+
+async def _run_helper(script: Path, args: list[str], project_root: str,
+                      timeout: float, marker: str) -> dict:
+    binary = find_godot_binary()
+    if not binary:
+        raise GodotBinaryNotFound(
+            "No Godot executable found. Set GODOT_BIN to the editor binary, or place "
+            "one in a ./godot/ directory."
+        )
+
+    command = [binary, "--headless", "--path", project_root, "--script", str(script)]
+    if args:
+        command += ["--", *args]
+
+    process = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise TimeoutError(
+            f"Godot did not finish within {timeout}s. A cold project import can be slow."
+        ) from None
+
+    text = stdout.decode("utf-8", "replace")
+    payload = _extract_json(text, marker)
+    if payload is None:
+        detail = (stderr.decode("utf-8", "replace") or text).strip()[-1500:]
+        raise RuntimeError("Could not read Godot's output. Got:\n" + detail)
+    return payload
+
+
+def _extract_json(text: str, marker: str = "scenes") -> dict | None:
     """Pull the helper's JSON out of Godot's chatter.
 
     Godot prints engine banners and import progress to stdout alongside script
@@ -113,7 +159,7 @@ def _extract_json(text: str) -> dict | None:
                 parsed = json.loads(stripped)
             except json.JSONDecodeError:
                 continue
-            if isinstance(parsed, dict) and "scenes" in parsed:
+            if isinstance(parsed, dict) and marker in parsed:
                 return parsed
     return None
 

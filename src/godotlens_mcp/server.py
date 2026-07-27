@@ -28,6 +28,7 @@ from godotlens_mcp.lsp_client import (
 from godotlens_mcp.scene import (
     GodotBinaryNotFound,
     collect_scripts,
+    dump_project,
     dump_scenes,
     validate_scene,
 )
@@ -753,6 +754,50 @@ TOOLS = [
             "idempotentHint": True, "openWorldHint": False,
         },
     },
+    {
+        "name": "gdscript_find",
+        "description": (
+            "Find where a symbol is declared BY NAME, without needing its position. "
+            "Returns: declaration sites with file, ZERO-BASED line and character, kind, "
+            "and containing class. "
+            "USE THIS FIRST when you know a name but not its location - the returned "
+            "line/character feed directly into gdscript_references, gdscript_hover and "
+            "gdscript_rename. Guessing a character offset and landing one column off "
+            "returns an empty result that looks identical to 'no such symbol'. "
+            "Positions come from the language server, not from text matching."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Exact symbol name, e.g. take_damage"},
+                "file": {
+                    "type": "string",
+                    "description": "Optional: restrict the search to one file instead of the project",
+                },
+                "include_references": {
+                    "type": "boolean",
+                    "description": "Also return every reference to the first declaration found",
+                },
+            },
+            "required": ["name"],
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "project_config",
+        "description": (
+            "Get the project's resolved configuration: autoload singletons, input action "
+            "names, class_name globals, and the main scene. "
+            "Autoload and input action names are BARE STRINGS at the point of use - "
+            "GameState.add_score(1), Input.is_action_pressed(\"jump\") - and nothing "
+            "validates them. Neither the compiler nor the language server catches a typo; "
+            "it is a silent runtime no-op. Check names here before writing them. "
+            "Values come from ProjectSettings via the engine, so defaults and "
+            "feature-tagged overrides resolve correctly. Requires a Godot binary."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
 ]
 
 
@@ -776,6 +821,70 @@ async def ensure_dap() -> tuple[bool, str]:
 async def ensure_connected() -> tuple[bool, str]:
     """Ensure LSP is connected, return (ok, error_message)."""
     return await _lsp.connect()
+
+
+async def _list_project_scripts(root: str, limit: int = 4000) -> list[str]:
+    """Every .gd file under the project, skipping Godot's own cache."""
+    def _walk() -> list[str]:
+        found: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in {".godot", ".git", ".import", "node_modules"}]
+            for filename in filenames:
+                if filename.endswith(".gd"):
+                    found.append(os.path.join(dirpath, filename))
+                    if len(found) >= limit:
+                        return found
+        return found
+
+    return await asyncio.get_event_loop().run_in_executor(None, _walk)
+
+
+async def _files_mentioning(name: str, paths: list[str]) -> list[str]:
+    """Narrow the candidate set with a cheap text scan.
+
+    This only decides which files to ASK THE LSP about — it never decides what a
+    symbol means. A file that does not contain the identifier as text cannot declare
+    it, so this is a safe filter rather than an interpretation.
+    """
+    def _scan() -> list[str]:
+        hits = []
+        for path in paths:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    if name in handle.read():
+                        hits.append(path)
+            except OSError:
+                continue
+        return hits
+
+    return await asyncio.get_event_loop().run_in_executor(None, _scan)
+
+
+def _walk_symbols(symbols: Any, wanted: str, container: str = "") -> list[dict]:
+    """Collect declarations matching ``wanted`` from a documentSymbol tree.
+
+    selectionRange covers the identifier itself, so it yields the exact position the
+    position-based tools need — no column counting, which is where callers go wrong.
+    """
+    found: list[dict] = []
+    for node in symbols or []:
+        if not isinstance(node, dict):
+            continue
+        node_name = node.get("name", "")
+        if node_name == wanted:
+            selection = node.get("selectionRange") or node.get("range") or {}
+            start = selection.get("start", {})
+            found.append({
+                "line": start.get("line", 0),
+                "char": start.get("character", 0),
+                "kind": node.get("kind", 0),
+                "detail": node.get("detail", ""),
+                "container": container,
+            })
+        found.extend(_walk_symbols(node.get("children"), wanted,
+                                   f"{container}.{node_name}" if container else node_name))
+    return found
 
 
 def _res_to_disk(res_path: str, project_root: str) -> str:
@@ -1156,6 +1265,50 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
 
             else:
                 return tool_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
+
+        elif name == "gdscript_find":
+            wanted = arguments["name"]
+            root = find_project_root()
+            if arguments.get("file"):
+                candidates = [await _abspath(arguments["file"])]
+            else:
+                candidates = await _files_mentioning(wanted, await _list_project_scripts(root))
+
+            declarations = []
+            for path in candidates:
+                try:
+                    tree = await _lsp.request("textDocument/documentSymbol", {
+                        "textDocument": {"uri": file_uri(path)}})
+                except (LSPError, UnsupportedPathError):
+                    continue
+                for hit in _walk_symbols(tree, wanted):
+                    declarations.append({"file": path.replace("\\", "/"), **hit})
+
+            result = {
+                "name": wanted,
+                "declarations": declarations,
+                "count": len(declarations),
+                "searched_files": len(candidates),
+            }
+            if not declarations:
+                result["hint"] = (
+                    "No declaration found. The name may be a local variable, a parameter, "
+                    "or an engine symbol — try gdscript_engine_api for built-ins."
+                )
+            elif arguments.get("include_references"):
+                primary = declarations[0]
+                try:
+                    refs = await _lsp.request("textDocument/references", {
+                        "textDocument": {"uri": file_uri(primary["file"])},
+                        "position": {"line": primary["line"], "character": primary["char"]},
+                        "context": {"includeDeclaration": True}})
+                    result["references"] = [compact_location(r) for r in refs or []]
+                except LSPError as exc:
+                    result["references_error"] = str(exc)
+
+        elif name == "project_config":
+            root = find_project_root()
+            result = await dump_project(root)
 
         elif name == "scene_state":
             root = find_project_root()

@@ -456,6 +456,13 @@ config/features=PackedStringArray("4.6", "GL Compatibility")
 
 GameState="*res://game_state.gd"
 
+[input]
+
+jump={
+"deadzone": 0.5,
+"events": []
+}
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"

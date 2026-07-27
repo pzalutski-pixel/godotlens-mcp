@@ -66,6 +66,18 @@ editor, not inferred. Several of these were returning confident wrong answers.
   writing to disk**.
 - `gdscript_references_in_file` — `documentHighlight` on Godot 4.7+, avoiding the
   whole-project reparse that `references` triggers on 4.6+.
+- `gdscript_find` — locate a declaration **by name**, returning a position the other
+  tools can use directly. Every navigation tool takes `(file, line, character)`, so an
+  agent that knows a name has to read the file and count columns; landing one column
+  off returns an empty result indistinguishable from "no such symbol", which sends it
+  back to `grep` and forfeits the point of the tool. Positions come from
+  `documentSymbol`'s `selectionRange`, so they are the language server's answer rather
+  than a text match.
+- `project_config` — autoloads, input actions, `class_name` globals and the main scene,
+  read from `ProjectSettings` via the engine. Autoload and input action names are bare
+  strings at the point of use and nothing in the toolchain validates them: a typo in
+  `Input.is_action_pressed("jmup")` is a silent runtime no-op that neither the compiler
+  nor the language server nor scene validation catches.
 - **Runtime inspection via Godot's Debug Adapter Protocol** (`debug_*`, 10 tools).
   Godot serves DAP from the editor on port 6006 with no addon, so this keeps the
   zero-install property the LSP bridge already had. It closes the one part of the
