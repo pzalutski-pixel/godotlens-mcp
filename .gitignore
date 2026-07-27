@@ -16,3 +16,9 @@ node_modules/
 # Local Godot editor used for integration testing — never commit the binary
 godot/
 *.exe
+
+# Coverage artefacts embed absolute filesystem paths
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

@@ -31,12 +31,12 @@ def test_file_uri_unix_path():
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows drive paths")
 def test_file_uri_windows_path():
-    assert file_uri("C:\\Users\\pzalu\\main.gd") == "file:///C:/Users/pzalu/main.gd"
+    assert file_uri("C:\\project\\scripts\\main.gd") == "file:///C:/project/scripts/main.gd"
 
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows drive paths")
 def test_file_uri_forward_slash_windows():
-    assert file_uri("C:/Users/pzalu/main.gd") == "file:///C:/Users/pzalu/main.gd"
+    assert file_uri("C:/project/scripts/main.gd") == "file:///C:/project/scripts/main.gd"
 
 
 def test_file_uri_resolves_relative_paths(tmp_path, monkeypatch):
