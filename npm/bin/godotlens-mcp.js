@@ -2,9 +2,15 @@
 "use strict";
 
 const { execSync, spawn } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 
+// Layout produced by the release workflow:
+//   <pkg>/server/godotlens_mcp/{__main__,server,lsp_client,__init__}.py
+// PYTHONPATH must therefore point at <pkg>/server, the parent of the package dir.
 const SERVER_DIR = path.join(__dirname, "..", "server");
+const PACKAGE_DIR = path.join(SERVER_DIR, "godotlens_mcp");
+const ENTRY_POINT = path.join(PACKAGE_DIR, "__main__.py");
 
 function findPython() {
   for (const cmd of ["python3", "python"]) {
@@ -41,10 +47,21 @@ if (!python) {
   process.exit(1);
 }
 
+if (!fs.existsSync(ENTRY_POINT)) {
+  process.stderr.write(
+    `Error: godotlens-mcp server files are missing or misplaced.\n` +
+      `Expected entry point at: ${ENTRY_POINT}\n` +
+      `This indicates a broken package install. Please reinstall, and if the\n` +
+      `problem persists report it at\n` +
+      `https://github.com/pzalutski-pixel/godotlens-mcp/issues\n`
+  );
+  process.exit(1);
+}
+
 const args = process.argv.slice(2);
-const child = spawn(python, [path.join(SERVER_DIR, "__main__.py"), ...args], {
+const child = spawn(python, [ENTRY_POINT, ...args], {
   stdio: "inherit",
-  env: { ...process.env, PYTHONPATH: path.join(SERVER_DIR, "..") },
+  env: { ...process.env, PYTHONPATH: SERVER_DIR },
 });
 
 child.on("exit", (code) => process.exit(code ?? 0));

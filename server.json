@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pzalutski-pixel/godotlens",
   "title": "GodotLens",
-  "description": "15 semantic GDScript analysis tools via Godot's built-in LSP: navigation, references, rename.",
+  "description": "Godot's own view of your GDScript project: navigation, diagnostics, engine API, scene checks",
   "repository": {
     "url": "https://github.com/pzalutski-pixel/godotlens-mcp",
     "source": "github"
   },
-  "version": "1.0.2",
+  "version": "1.1.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "godotlens-mcp",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -20,22 +20,67 @@
       "environmentVariables": [
         {
           "name": "GODOT_LSP_HOST",
-          "description": "Godot LSP server host",
+          "description": "Godot language server host",
           "format": "string",
           "default": "127.0.0.1"
         },
         {
           "name": "GODOT_LSP_PORT",
-          "description": "Godot LSP server port",
+          "description": "Godot language server port (the VS Code extension uses 6008)",
           "format": "number",
           "default": "6005"
+        },
+        {
+          "name": "GODOT_DAP_HOST",
+          "description": "Godot debug adapter host",
+          "format": "string",
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "GODOT_DAP_PORT",
+          "description": "Godot debug adapter port, used by the debug_* tools",
+          "format": "number",
+          "default": "6006"
+        },
+        {
+          "name": "GODOT_BIN",
+          "description": "Godot executable, required by scene_* and project_config",
+          "format": "string"
+        },
+        {
+          "name": "GODOT_PROJECT_ROOT",
+          "description": "Project root; auto-detected by walking up for project.godot",
+          "format": "string"
+        },
+        {
+          "name": "GODOT_LSP_TIMEOUT",
+          "description": "Seconds to wait for a single LSP response",
+          "format": "number",
+          "default": "15"
+        },
+        {
+          "name": "GODOT_DIAGNOSTICS_TIMEOUT",
+          "description": "Seconds to wait for diagnostics after a sync",
+          "format": "number",
+          "default": "8"
+        },
+        {
+          "name": "GODOT_VERSION",
+          "description": "Override Godot capability detection",
+          "format": "string"
+        },
+        {
+          "name": "GODOT_FIND_FILE_LIMIT",
+          "description": "Max files gdscript_find inspects across the project",
+          "format": "number",
+          "default": "60"
         }
       ]
     },
     {
       "registryType": "pypi",
       "identifier": "godotlens-mcp",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -43,15 +88,60 @@
       "environmentVariables": [
         {
           "name": "GODOT_LSP_HOST",
-          "description": "Godot LSP server host",
+          "description": "Godot language server host",
           "format": "string",
           "default": "127.0.0.1"
         },
         {
           "name": "GODOT_LSP_PORT",
-          "description": "Godot LSP server port",
+          "description": "Godot language server port (the VS Code extension uses 6008)",
           "format": "number",
           "default": "6005"
+        },
+        {
+          "name": "GODOT_DAP_HOST",
+          "description": "Godot debug adapter host",
+          "format": "string",
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "GODOT_DAP_PORT",
+          "description": "Godot debug adapter port, used by the debug_* tools",
+          "format": "number",
+          "default": "6006"
+        },
+        {
+          "name": "GODOT_BIN",
+          "description": "Godot executable, required by scene_* and project_config",
+          "format": "string"
+        },
+        {
+          "name": "GODOT_PROJECT_ROOT",
+          "description": "Project root; auto-detected by walking up for project.godot",
+          "format": "string"
+        },
+        {
+          "name": "GODOT_LSP_TIMEOUT",
+          "description": "Seconds to wait for a single LSP response",
+          "format": "number",
+          "default": "15"
+        },
+        {
+          "name": "GODOT_DIAGNOSTICS_TIMEOUT",
+          "description": "Seconds to wait for diagnostics after a sync",
+          "format": "number",
+          "default": "8"
+        },
+        {
+          "name": "GODOT_VERSION",
+          "description": "Override Godot capability detection",
+          "format": "string"
+        },
+        {
+          "name": "GODOT_FIND_FILE_LIMIT",
+          "description": "Max files gdscript_find inspects across the project",
+          "format": "number",
+          "default": "60"
         }
       ]
     }

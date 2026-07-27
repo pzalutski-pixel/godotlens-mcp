@@ -2,25 +2,31 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+# Single source of truth. pyproject (1.0.5), npm/package.json (1.0.0) and
+# server.json (1.0.2) had all drifted apart.
+path = "src/godotlens_mcp/__init__.py"
+
 [project]
 name = "godotlens-mcp"
-version = "1.0.5"
-description = "MCP server providing 15 AI-optimized tools for GDScript code analysis via Godot's built-in LSP"
+dynamic = ["version"]
+description = "MCP server giving AI agents Godot's own view of a GDScript project: navigation, diagnostics, engine API, and scene verification"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Peter Zalutski"}]
 keywords = ["mcp", "mcp-server", "godot", "gdscript", "lsp", "code-analysis", "code-intelligence", "semantic-analysis", "ai-agents", "claude", "developer-tools"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
+    "Operating System :: OS Independent",
 ]
 dependencies = []
 
@@ -36,16 +42,44 @@ Issues = "https://github.com/pzalutski-pixel/godotlens-mcp/issues"
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.3.0",
+    "pytest-cov>=5.0.0",
     "ruff>=0.7.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# No test should ever hang the suite; transport tests talk to real sockets.
+timeout = 120
+markers = [
+    "integration: requires a real Godot binary (skipped when none is found)",
+]
 
 [tool.ruff]
 target-version = "py310"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+# ASYNC matters most here: this is an asyncio codebase where a blocking call or an
+# un-awaited coroutine is a real bug class. B/UP/RUF catch the rest.
+select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.coverage.run]
+source = ["godotlens_mcp"]
+# The MCP server is exercised most thoroughly by tests that spawn it as a real
+# subprocess. Without parallel mode plus subprocess startup hooks, none of that
+# counts and server.py looks far less covered than it is.
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+sigterm = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

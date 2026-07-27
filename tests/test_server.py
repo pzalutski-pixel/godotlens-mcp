@@ -8,14 +8,24 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from godotlens_mcp.server import TOOLS, handle_request, handle_tool_call, read_message, write_message
+from godotlens_mcp.lsp_client import LSPConnectionLost, LSPError
+from godotlens_mcp.server import (
+    LATEST_PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    TOOLS,
+    ParseFailure,
+    handle_request,
+    handle_tool_call,
+    read_message,
+    write_message,
+)
 
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
 
 def test_list_tools_count():
-    assert len(TOOLS) == 15
+    assert len(TOOLS) == 33
 
 
 def test_list_tools_names():
@@ -23,7 +33,6 @@ def test_list_tools_names():
     expected = {
         "gdscript_status",
         "gdscript_definition",
-        "gdscript_declaration",
         "gdscript_references",
         "gdscript_hover",
         "gdscript_symbols",
@@ -31,11 +40,30 @@ def test_list_tools_names():
         "gdscript_rename",
         "gdscript_sync_file",
         "gdscript_sync_files",
-        "gdscript_delete_file",
+        "gdscript_release_file",
         "gdscript_symbols_batch",
         "gdscript_definitions_batch",
         "gdscript_references_batch",
         "gdscript_diagnostics",
+        "gdscript_engine_api",
+        "gdscript_complete",
+        "gdscript_validate",
+        "gdscript_references_in_file",
+        "scene_state",
+        "scene_validate",
+        "debug_status",
+        "debug_output",
+        "debug_set_breakpoints",
+        "debug_stack_trace",
+        "debug_inspect",
+        "debug_evaluate",
+        "debug_continue",
+        "debug_pause",
+        "debug_step_over",
+        "debug_terminate",
+        "debug_run",
+        "gdscript_find",
+        "project_config",
     }
     assert names == expected
 
@@ -44,6 +72,24 @@ def test_all_tools_have_input_schema():
     for tool in TOOLS:
         assert "inputSchema" in tool, f"Tool {tool['name']} missing inputSchema"
         assert tool["inputSchema"]["type"] == "object"
+
+
+def test_all_tools_declare_annotations():
+    """The MCP schema defaults destructiveHint and openWorldHint to TRUE.
+
+    Staying silent means a client must assume gdscript_hover might destroy something,
+    which costs the user an approval prompt on every read.
+    """
+    for tool in TOOLS:
+        assert "annotations" in tool, f"Tool {tool['name']} has no annotations"
+        assert tool["annotations"].get("openWorldHint") is False
+
+
+def test_declaration_tool_is_gone():
+    """gdscript_declaration ran the identical find_symbols() call as definition, and on
+    engine built-ins could call window_move_to_foreground(), pulling the user's editor
+    window in front of whatever they were doing."""
+    assert "gdscript_declaration" not in {t["name"] for t in TOOLS}
 
 
 # ---------------------------------------------------------------------------
@@ -56,9 +102,29 @@ async def test_initialize_response():
     resp = await handle_request(msg)
     assert resp["id"] == 1
     result = resp["result"]
-    assert result["protocolVersion"] == "2025-03-26"
+    assert result["protocolVersion"] == LATEST_PROTOCOL_VERSION
     assert "tools" in result["capabilities"]
     assert result["serverInfo"]["name"] == "godotlens-mcp"
+    assert "ZERO-BASED" in result["instructions"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", SUPPORTED_PROTOCOL_VERSIONS)
+async def test_initialize_echoes_supported_protocol_version(requested):
+    """Spec: reply with the client's version when we support it."""
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+           "params": {"protocolVersion": requested}}
+    resp = await handle_request(msg)
+    assert resp["result"]["protocolVersion"] == requested
+
+
+@pytest.mark.asyncio
+async def test_initialize_offers_latest_for_unknown_protocol_version():
+    """Spec: reply with a version we do support, not the one we were handed."""
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+           "params": {"protocolVersion": "1999-01-01"}}
+    resp = await handle_request(msg)
+    assert resp["result"]["protocolVersion"] == LATEST_PROTOCOL_VERSION
 
 
 @pytest.mark.asyncio
@@ -74,7 +140,7 @@ async def test_tools_list_response():
     msg = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     resp = await handle_request(msg)
     tools = resp["result"]["tools"]
-    assert len(tools) == 15
+    assert len(tools) == 33
     assert tools[0]["name"] == "gdscript_status"
 
 
@@ -156,12 +222,30 @@ async def test_definition_returns_compact():
 
 
 @pytest.mark.asyncio
-async def test_definition_null_result():
+async def test_definition_null_result_is_structured_not_a_sentinel_string():
+    """A null/empty result must stay machine-readable.
+
+    Regression: every falsy result rendered as the literal string "No results", so an
+    agent could not tell "zero references" from "the call failed" or "your coordinates
+    landed on whitespace".
+    """
     lsp = _mock_lsp()
     lsp.request = AsyncMock(return_value=None)
     with patch("godotlens_mcp.server._lsp", lsp):
         result = await handle_tool_call("gdscript_definition", {"file": "main.gd", "line": 0, "character": 0})
-    assert result["content"][0]["text"] == "No results"
+    assert result["content"][0]["text"] != "No results"
+    assert json.loads(result["content"][0]["text"]) is None
+    assert not result.get("isError")
+
+
+@pytest.mark.asyncio
+async def test_empty_list_result_is_distinguishable_from_failure():
+    lsp = _mock_lsp()
+    lsp.request = AsyncMock(return_value=[])
+    with patch("godotlens_mcp.server._lsp", lsp):
+        result = await handle_tool_call("gdscript_references", {"file": "main.gd", "line": 0, "character": 0})
+    assert json.loads(result["content"][0]["text"]) == []
+    assert not result.get("isError")
 
 
 @pytest.mark.asyncio
@@ -187,15 +271,45 @@ async def test_unknown_tool():
 
 
 @pytest.mark.asyncio
-async def test_error_disconnects_and_hints():
+async def test_transport_failure_disconnects_and_hints():
+    """A genuine transport failure should drop the socket so the next call reconnects."""
     lsp = _mock_lsp()
-    lsp.request = AsyncMock(side_effect=Exception("broken pipe"))
+    lsp.request = AsyncMock(side_effect=LSPConnectionLost("broken pipe"))
     with patch("godotlens_mcp.server._lsp", lsp):
         result = await handle_tool_call("gdscript_definition", {"file": "main.gd", "line": 0, "character": 0})
     assert result["isError"] is True
     lsp.disconnect.assert_awaited_once()
     data = json.loads(result["content"][0]["text"])
+    assert data["kind"] == "connection_lost"
     assert "hint" in data
+
+
+@pytest.mark.asyncio
+async def test_lsp_error_does_not_tear_down_a_healthy_connection():
+    """An LSP-level error means the connection is fine — keep it.
+
+    Regression: any exception triggered disconnect(), so a -32601 for an unsupported
+    method (or a missing-file error) forced a full reconnect and re-initialize.
+    """
+    lsp = _mock_lsp()
+    lsp.request = AsyncMock(side_effect=LSPError("Method not found: x", code=-32601))
+    with patch("godotlens_mcp.server._lsp", lsp):
+        result = await handle_tool_call("gdscript_definition", {"file": "main.gd", "line": 0, "character": 0})
+    assert result["isError"] is True
+    lsp.disconnect.assert_not_awaited()
+    data = json.loads(result["content"][0]["text"])
+    assert data["kind"] == "unsupported_method"
+    assert data["code"] == -32601
+
+
+@pytest.mark.asyncio
+async def test_missing_file_does_not_disconnect():
+    lsp = _mock_lsp()
+    with patch("godotlens_mcp.server._lsp", lsp):
+        result = await handle_tool_call("gdscript_sync_file", {"file": "does_not_exist_xyz.gd"})
+    assert result["isError"] is True
+    lsp.disconnect.assert_not_awaited()
+    assert json.loads(result["content"][0]["text"])["kind"] == "file_error"
 
 
 @pytest.mark.asyncio
@@ -240,6 +354,49 @@ async def test_read_message_returns_none_on_eof():
         mock_sys.stdin.buffer = fake_buffer
         result = await read_message()
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_blank_line_is_skipped_not_treated_as_eof():
+    """Regression: a stray newline terminated the server, dropping every later request."""
+    data = b'\n\n{"jsonrpc":"2.0","id":7,"method":"ping"}\n'
+    with patch("godotlens_mcp.server.sys") as mock_sys:
+        mock_sys.stdin.buffer = io.BytesIO(data)
+        result = await read_message()
+    assert result == {"jsonrpc": "2.0", "id": 7, "method": "ping"}
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_yields_parse_error_not_a_crash():
+    """Regression: json.loads raised out of the loop and killed the process."""
+    with patch("godotlens_mcp.server.sys") as mock_sys:
+        mock_sys.stdin.buffer = io.BytesIO(b"NOT JSON\n")
+        result = await read_message()
+    assert isinstance(result, ParseFailure)
+    assert result.code == -32700
+
+
+@pytest.mark.asyncio
+async def test_json_array_is_rejected_not_a_crash():
+    """Regression: msg.get() on a list raised AttributeError and killed the process.
+
+    JSON-RPC batching was removed in MCP 2025-06-18, so an array is simply invalid.
+    """
+    with patch("godotlens_mcp.server.sys") as mock_sys:
+        mock_sys.stdin.buffer = io.BytesIO(b'[{"jsonrpc":"2.0","id":1,"method":"ping"}]\n')
+        result = await read_message()
+    assert isinstance(result, ParseFailure)
+    assert result.code == -32600
+    assert "batching" in result.message
+
+
+@pytest.mark.asyncio
+async def test_non_object_scalar_is_rejected():
+    with patch("godotlens_mcp.server.sys") as mock_sys:
+        mock_sys.stdin.buffer = io.BytesIO(b'"just a string"\n')
+        result = await read_message()
+    assert isinstance(result, ParseFailure)
+    assert result.code == -32600
 
 
 def test_write_message_outputs_newline_delimited_json():
@@ -291,4 +448,4 @@ def test_stdio_integration_initialize_and_tools_list():
 
     tools_response = json.loads(lines[1])
     assert tools_response["id"] == 2
-    assert len(tools_response["result"]["tools"]) == 15
+    assert len(tools_response["result"]["tools"]) == 33
