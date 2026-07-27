@@ -73,11 +73,26 @@ jobs:
           unzip -q godot.zip
           chmod +x "${{ matrix.binary }}" 2>/dev/null || true
 
+      # The editor runs headless via its own flag, but debug_run asks it to spawn a
+      # *game*, and that child process still wants a display. Windows and macOS
+      # runners provide one; a bare Linux runner does not, so the game starts, exits
+      # immediately, and produces no output. Xvfb gives it somewhere to draw.
+      - name: Provide a virtual display (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+
       - name: Run integration tests against real Godot
         shell: bash
         env:
           GODOT_BIN: ${{ github.workspace }}/godot-bin/${{ matrix.binary }}
-        run: python -m pytest -q -m integration
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python -m pytest -q -m integration
+          else
+            python -m pytest -q -m integration
+          fi
 
   package:
     name: npm package installs and runs
