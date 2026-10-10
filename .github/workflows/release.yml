@@ -67,16 +67,15 @@ jobs:
           python-version: '3.12'
 
       - name: Install build tools
-        run: pip install build twine
+        run: pip install build
 
       - name: Build package
         run: python -m build
 
+      # PyPI accepts this upload through trusted publishing: the project's settings on pypi.org trust this
+      # repository's release.yml, and the job proves who it is with GitHub's OIDC token, so no PyPI token is stored.
       - name: Publish to PyPI
-        run: python -m twine upload dist/*
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-npm:
     needs: test
