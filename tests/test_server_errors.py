@@ -5,6 +5,7 @@ Godot install. The rule they enforce: a tool must fail in a way the agent can ac
 on, and only a genuine transport failure may drop the connection.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, create_autospec, patch
 
@@ -58,6 +59,7 @@ def make_lsp(**overrides):
     lsp.server_capabilities = {}
     lsp.workspace_mismatch = None
     lsp.server_messages = []
+    lsp.document_lock = asyncio.Lock()
     for key, value in overrides.items():
         setattr(lsp, key, value)
     return lsp
@@ -155,6 +157,63 @@ async def test_disconnected_lsp_short_circuits_every_tool():
     assert payload["status"] == "disconnected"
 
 
+def _down():
+    return make_lsp(connect=AsyncMock(return_value=(False, "Connection refused")))
+
+
+async def test_project_config_does_not_need_the_language_server():
+    """Regression: every tool but gdscript_status was refused while the LSP was down."""
+    with patch("godotlens_mcp.server.dump_project",
+               AsyncMock(return_value={"autoloads": [], "input_actions": []})):
+        payload, is_error, _ = await call("project_config", {}, _down())
+    assert not is_error, payload
+    assert "autoloads" in payload
+
+
+@pytest.mark.parametrize("report,valid", [
+    ({"broken": [], "missing_autoloads": [], "main_scene": {"exists": True}}, True),
+    ({"broken": [{"file": "a.tscn"}], "missing_autoloads": [], "main_scene": {"exists": True}}, False),
+    ({"broken": [], "missing_autoloads": [{"name": "X"}], "main_scene": {"exists": True}}, False),
+    ({"broken": [], "missing_autoloads": [], "main_scene": {"exists": False}}, False),
+])
+async def test_project_validate_is_valid_only_with_nothing_broken(report, valid):
+    with patch("godotlens_mcp.server.validate_project", AsyncMock(return_value=dict(report))):
+        payload, is_error, _ = await call("project_validate", {}, _down())
+    assert not is_error, payload
+    assert payload["valid"] is valid
+
+
+async def test_scene_state_does_not_need_the_language_server():
+    with patch("godotlens_mcp.server.dump_scenes",
+               AsyncMock(return_value={"scenes": {}, "errors": {}})):
+        payload, is_error, _ = await call("scene_state", {"files": ["main.tscn"]}, _down())
+    assert not is_error, payload
+
+
+async def test_scene_validate_without_the_lsp_runs_but_says_the_handler_check_was_skipped():
+    scene = {
+        "nodes": [{"path": ".", "name": "Main", "type": "Node2D",
+                   "script": "res://main.gd", "properties": {}},
+                  {"path": "Bare", "name": "Bare", "type": "Node", "script": None,
+                   "properties": {}}],
+        "connections": [{"signal": "x", "from": ".", "to": "Bare", "method": "_on_x"}],
+    }
+    with patch("godotlens_mcp.server.dump_scenes",
+               AsyncMock(return_value={"scenes": {"res://main.tscn": scene}, "errors": {}})):
+        payload, is_error, _ = await call("scene_validate", {"files": ["main.tscn"]}, _down())
+    assert not is_error, payload
+    assert payload["handler_check"].startswith("skipped")
+    # Checks that need no LSP still ran.
+    assert payload["scenes"]["res://main.tscn"]["problems"][0]["kind"] == "target_has_no_script"
+
+
+async def test_debug_tools_do_not_need_the_language_server():
+    dap = make_dap()
+    payload, is_error, _ = await call("debug_status", {}, _down(), dap)
+    assert not is_error, payload
+    assert payload["connected"] is True
+
+
 async def test_status_reports_disconnection_without_erroring():
     """status is the diagnostic tool; it must answer even when nothing is connected."""
     lsp = make_lsp(connect=AsyncMock(return_value=(False, "Connection refused")))
@@ -218,6 +277,7 @@ def make_dap(**overrides):
     dap.terminated = False
     dap.output = []
     dap.take_output = lambda clear=True: []
+    dap.take_errors = lambda clear=True: []
     for key, value in overrides.items():
         setattr(dap, key, value)
     return dap
@@ -258,6 +318,117 @@ async def test_dap_timeout_is_typed():
     payload, is_error, _ = await call("debug_stack_trace", {}, dap=dap)
     assert is_error
     assert payload["kind"] == "dap_connection_lost"
+
+
+# ---------------------------------------------------------------------------
+# debug_evaluate guard
+# ---------------------------------------------------------------------------
+#
+# Godot answers evaluate only while stopped, and only against the frame's script
+# instance. Otherwise the request is never answered, or the game RESUMES.
+
+
+def _stopped_dap(frames, members):
+    dap = make_dap(
+        stopped_state={"reason": "breakpoint", "thread_id": 1},
+        stack_trace=AsyncMock(return_value=frames),
+        scopes=AsyncMock(return_value=[
+            {"name": "Locals", "variables_reference": 1},
+            {"name": "Members", "variables_reference": 2},
+            {"name": "Globals", "variables_reference": 3}]),
+        variables=AsyncMock(return_value=members),
+        evaluate=AsyncMock(return_value={"result": "42", "type": "int"}),
+    )
+    return dap
+
+
+FRAME = [{"id": 0, "name": "take_damage", "file": "/p/player.gd", "line": 3}]
+SELF = [{"name": "self", "value": "Player", "type": "Object"}]
+
+
+async def test_evaluate_is_refused_while_the_game_runs():
+    dap = make_dap(evaluate=AsyncMock())
+    payload, is_error, _ = await call("debug_evaluate", {"expression": "hp"}, dap=dap)
+    assert is_error
+    assert payload["kind"] == "not_paused"
+    dap.evaluate.assert_not_awaited()
+
+
+async def test_evaluate_is_refused_when_stopped_outside_script_code():
+    dap = _stopped_dap(frames=[], members=[])
+    payload, is_error, _ = await call("debug_evaluate", {"expression": "hp"}, dap=dap)
+    assert is_error and payload["kind"] == "not_paused"
+    dap.evaluate.assert_not_awaited()
+
+
+async def test_evaluate_is_refused_in_a_frame_with_no_script_instance():
+    """A static function or a parse-error break: Godot would resume the game."""
+    dap = _stopped_dap(frames=FRAME, members=[{"name": "speed", "value": "3"}])
+    payload, is_error, _ = await call("debug_evaluate", {"expression": "hp"}, dap=dap)
+    assert is_error
+    assert payload["kind"] == "no_script_instance"
+    dap.evaluate.assert_not_awaited()
+
+
+async def test_evaluate_rejects_a_frame_that_is_not_on_the_stack():
+    dap = _stopped_dap(frames=FRAME, members=SELF)
+    payload, is_error, _ = await call("debug_evaluate", {"expression": "hp", "frame_id": 7}, dap=dap)
+    assert is_error and payload["kind"] == "unknown_frame"
+    dap.evaluate.assert_not_awaited()
+
+
+async def test_evaluate_is_sent_at_a_frame_with_an_instance():
+    dap = _stopped_dap(frames=FRAME, members=SELF)
+    payload, is_error, _ = await call("debug_evaluate", {"expression": "hp + 1"}, dap=dap)
+    assert not is_error, payload
+    dap.evaluate.assert_awaited_once_with("hp + 1", 0)
+
+
+# ---------------------------------------------------------------------------
+# gdscript_engine_api inheritance
+# ---------------------------------------------------------------------------
+
+CHAIN = [
+    {"name": "CharacterBody2D", "inherits": "PhysicsBody2D"},
+    {"name": "PhysicsBody2D", "inherits": "CollisionObject2D"},
+    {"name": "CollisionObject2D", "inherits": "Node2D"},
+    {"name": "Node2D", "inherits": "CanvasItem"},
+    {"name": "CanvasItem", "inherits": "Node"},
+    {"name": "Node", "inherits": "Object"},
+    {"name": "Object", "inherits": ""},
+]
+
+
+async def test_engine_api_finds_an_inherited_member():
+    """nativeSymbol searches the named class only; add_child lives on Node."""
+    async def native_symbol(method, params, *args, **kwargs):
+        if params["native_class"] == "Node" and params["symbol_name"] == "add_child":
+            return {"name": "add_child", "detail": "func Node.add_child(node: Node) -> void"}
+        return None
+
+    lsp = make_lsp(request=native_symbol, native_capabilities={"native_classes": CHAIN})
+    payload, is_error, _ = await call(
+        "gdscript_engine_api", {"class_name": "CharacterBody2D", "member": "add_child"}, lsp)
+    assert not is_error, payload
+    assert payload["declared_in"] == "Node"
+    assert payload["inheritance"][:2] == ["CharacterBody2D", "PhysicsBody2D"]
+
+
+async def test_engine_api_reports_the_chain_it_searched_on_a_miss():
+    lsp = make_lsp(request=AsyncMock(return_value=None),
+                   native_capabilities={"native_classes": CHAIN})
+    payload, _, _ = await call(
+        "gdscript_engine_api", {"class_name": "CharacterBody2D", "member": "nope"}, lsp)
+    assert payload["found"] is False
+    assert payload["searched"][-1] == "Object"
+
+
+async def test_engine_api_survives_a_cyclic_class_list():
+    looped = [{"name": "A", "inherits": "B"}, {"name": "B", "inherits": "A"}]
+    lsp = make_lsp(request=AsyncMock(return_value=None),
+                   native_capabilities={"native_classes": looped})
+    payload, _, _ = await call("gdscript_engine_api", {"class_name": "A", "member": "x"}, lsp)
+    assert payload["searched"] == ["A", "B"]
 
 
 async def test_unknown_debug_tool_is_rejected():
@@ -319,8 +490,10 @@ async def test_every_tool_has_a_dispatch_branch():
     lsp = make_lsp()
     dap = make_dap()
     unroutable = []
-    for tool in TOOLS:
-        payload, is_error, _ = await call(tool["name"], {}, lsp, dap)
-        if is_error and "Unknown tool" in str(payload.get("error", "")):
-            unroutable.append(tool["name"])
+    # No binary, so runtime_run cannot launch a real game from whatever cwd this runs in.
+    with patch("godotlens_mcp.runtime.tools.find_godot_binary", lambda: None):
+        for tool in TOOLS:
+            payload, is_error, _ = await call(tool["name"], {}, lsp, dap)
+            if is_error and "Unknown tool" in str(payload.get("error", "")):
+                unroutable.append(tool["name"])
     assert not unroutable, f"advertised but not dispatched: {unroutable}"

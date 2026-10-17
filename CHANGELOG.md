@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-17
+
+An agent can now run the game itself, look at it and drive it, and several agents sharing one
+GodotLens can work at once. Everything below was exercised against a real Godot 4.7.1.
+
+### Fixed
+
+- **A game that printed often could hang every tool and freeze the editor.** Both protocol
+  clients read their socket only inside a call, and the debug adapter client "drained" until
+  the stream went quiet with no overall deadline, so `connect()`, `debug_output` and
+  `debug_run` never returned once a game printed more often than once a second. Between calls
+  nobody read at all, and Godot's adapter and language server write from the editor's main
+  thread in a loop that spins until the socket takes every byte: measured, an unread adapter
+  socket froze the 4.7.1 editor, language server included, within 10 seconds of a chatty game
+  starting. Both sockets are now read continuously and every wait is bounded.
+- **Tool calls were answered one at a time**, so one agent's `debug_run` or scene check
+  stalled every other agent sharing the server. Calls now run concurrently; `gdscript_*`
+  calls stay serialised so none observes another's temporary document content.
+- **`scene_validate` flagged correct scenes.** A node from an inherited or instanced scene is
+  stored as overrides only, so a connection to it was reported as `target_has_no_script`; and
+  a handler that is an engine method, such as `queue_free`, was reported missing. The scene
+  dump now merges base and instanced scenes, and engine methods count as handlers.
+- **`gdscript_validate` left the rejected draft in the language server** for a file the
+  session had not opened, so later queries on that file answered from code never written.
+- **Every tool except `gdscript_status` refused to run without the language server**,
+  including `project_config` and `scene_state`, which do not use it.
+- **`debug_output` never showed `push_error`, `push_warning` or engine errors**, despite
+  saying it did. They reach the debugger only as structured messages, now decoded into
+  `errors` with file, function, line and call stack.
+- **`debug_evaluate` could resume the game instead of answering** — in a static function or
+  at a parse-error break — or hang forever when nothing was paused. It now refuses both, and
+  resends an expression Godot left unanswered, which it otherwise never forwards again.
+- **`gdscript_engine_api` missed inherited members** (`CharacterBody2D.add_child`); it now
+  walks the class's ancestors and reports where the member is declared.
+- **A new `class_name` script stayed unknown with no explanation.** The editor registers new
+  files only when its window gains focus; sync now waits briefly for the class and otherwise
+  names the "Import Resources When Unfocused" setting that fixes it. Godot keeps folder times
+  in whole seconds, so a scan can miss a file created in the same second; when a class is
+  still unknown a second later, GodotLens briefly creates a hidden file in its folder so the
+  next scan re-reads it.
+- The scene dump compiled scripts before autoloads were registered, so any script naming an
+  autoload failed to compile there. `GODOT_LSP_TIMEOUT` was documented but never read.
+- Reconnecting to the language server kept documents opened on the dead connection.
+- **Every engine run GodotLens started wrote into the project's own `user://logs`**, where
+  Godot keeps only the newest five, so scene checks pushed out the developer's play and test
+  logs. Helper runs, imports and launched games now log to a private temporary file.
+
+### Added
+
+- **`runtime_*` — games GodotLens launches and is connected to.** `runtime_run` starts the game
+  as its own process with `--remote-debug` pointing at GodotLens: no editor, no run slot, one
+  game per agent, headless by default. Then `runtime_tree` (including nodes created at
+  runtime), `runtime_inspect`, `runtime_set`, `runtime_output` (prints and structured errors),
+  `runtime_reload` (hot reload, refused for scripts that do not compile), `runtime_monitors`,
+  `runtime_pause`, `runtime_time_scale`, `runtime_step`, `runtime_screenshot` (windowed runs,
+  placed off-screen), `runtime_status` and `runtime_stop`. Script errors never stop a game,
+  and on Windows a game cannot outlive GodotLens.
+- **`runtime_eval` and `runtime_input`** through a helper GodotLens loads with `--script` for
+  that run only — nothing is written to the project. Evaluate while the game runs, with
+  autoloads, engine singletons and `class_name` globals in scope; press input actions that
+  `is_action_just_pressed` sees.
+- **`project_validate`**: references that no longer resolve after files move, using the
+  engine's own rule that a reference whose UID still resolves is not broken. `project_config`
+  marks whether each autoload and the main scene exist.
+- **`scene_validate` checks much more**: missing signals, handler argument counts, unknown
+  node types, scripts that do not fit their node, missing parents, duplicate names and unique
+  names, changes to nodes missing from an instanced scene, and — as warnings — unknown
+  properties, wrong value types and NodePaths to nodes not in the scene.
+- `debug_run` takes `args`, passed to the game (`["--headless"]` runs it with no window).
+- `gdscript_status`, `debug_status` and `runtime_status` report `server_pid`.
+- A codec for Godot's binary value format, checked byte for byte against `var_to_bytes`.
+- `GODOT_RUNTIME_MAX_SESSIONS` (default 4).
+
+### Changed
+
+- The README gains *How to run* and *Limitations* sections; the editor is needed only for
+  `gdscript_*` and `debug_*`.
+
 ## [1.1.1] - 2026-07-27
 
 ### Fixed

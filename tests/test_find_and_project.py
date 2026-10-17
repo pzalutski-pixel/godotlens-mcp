@@ -127,6 +127,7 @@ def test_project_config_reports_autoloads(proc):
     game_state = next(a for a in payload["autoloads"] if a["name"] == "GameState")
     assert game_state["path"] == "res://game_state.gd"
     assert game_state["is_node"] is True, "the leading * marks it as a Node autoload"
+    assert game_state["exists"] is True
 
 
 def test_project_config_reports_input_actions(proc):
@@ -156,6 +157,7 @@ def test_project_config_reports_the_main_scene(proc):
     payload, is_error = process.call_tool("project_config", {})
     assert not is_error, payload
     assert payload["application"]["main_scene"] == "res://main.tscn"
+    assert payload["application"]["main_scene_exists"] is True
 
 
 def test_project_config_without_a_binary_is_actionable(mcp_process, live_lsp, tmp_path):

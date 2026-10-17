@@ -1,0 +1,65 @@
+{"hex":"00000000","literal":"null","type":0,"var_to_str":"null"}
+{"hex":"0100000001000000","literal":"true","type":1,"var_to_str":"true"}
+{"hex":"0100000000000000","literal":"false","type":1,"var_to_str":"false"}
+{"hex":"0200000000000000","literal":"0","type":2,"var_to_str":"0"}
+{"hex":"0200000001000000","literal":"1","type":2,"var_to_str":"1"}
+{"hex":"02000000ffffffff","literal":"-1","type":2,"var_to_str":"-1"}
+{"hex":"02000000ffffff7f","literal":"2147483647","type":2,"var_to_str":"2147483647"}
+{"hex":"020001000000008000000000","literal":"2147483648","type":2,"var_to_str":"2147483648"}
+{"hex":"02000100ffffff7fffffffff","literal":"-2147483649","type":2,"var_to_str":"-2147483649"}
+{"hex":"02000100ffffffffffffff7f","literal":"9223372036854775807","type":2,"var_to_str":"9223372036854775807"}
+{"hex":"0300000000000000","literal":"0.0","type":3,"var_to_str":"0.0"}
+{"hex":"030000000000c03f","literal":"1.5","type":3,"var_to_str":"1.5"}
+{"hex":"03000000000010c0","literal":"-2.25","type":3,"var_to_str":"-2.25"}
+{"hex":"030001009a9999999999b93f","literal":"0.1","type":3,"var_to_str":"0.1"}
+{"hex":"030001009c7500883ce4377e","literal":"1e+300","type":3,"var_to_str":"1e+300"}
+{"hex":"0400000000000000","literal":"\"\"","type":4,"var_to_str":"\"\""}
+{"hex":"040000000100000061000000","literal":"\"a\"","type":4,"var_to_str":"\"a\""}
+{"hex":"040000000400000061626364","literal":"\"abcd\"","type":4,"var_to_str":"\"abcd\""}
+{"hex":"040000000a00000068c3a96c6c6f20e29c930000","literal":"\"héllo ✓\"","type":4,"var_to_str":"\"héllo ✓\""}
+{"hex":"050000000000c03f00000040","literal":"Vector2(1.5, 2)","type":5,"var_to_str":"Vector2(1.5, 2)"}
+{"hex":"0600000003000000fcffffff","literal":"Vector2i(3, -4)","type":6,"var_to_str":"Vector2i(3, -4)"}
+{"hex":"070000000000803f000000400000404000009040","literal":"Rect2(1, 2, 3, 4.5)","type":7,"var_to_str":"Rect2(1, 2, 3, 4.5)"}
+{"hex":"0800000001000000020000000300000004000000","literal":"Rect2i(1, 2, 3, 4)","type":8,"var_to_str":"Rect2i(1, 2, 3, 4)"}
+{"hex":"090000000000803f0000004000004040","literal":"Vector3(1, 2, 3)","type":9,"var_to_str":"Vector3(1, 2, 3)"}
+{"hex":"0a000000ffffffff0000000007000000","literal":"Vector3i(-1, 0, 7)","type":10,"var_to_str":"Vector3i(-1, 0, 7)"}
+{"hex":"0b0000000000803f0000004000004040000080400000a0400000c040","literal":"Transform2D(1, 2, 3, 4, 5, 6)","type":11,"var_to_str":"Transform2D(1, 2, 3, 4, 5, 6)"}
+{"hex":"0c0000000000803f000000400000404000008040","literal":"Vector4(1, 2, 3, 4)","type":12,"var_to_str":"Vector4(1, 2, 3, 4)"}
+{"hex":"0d00000001000000020000000300000004000000","literal":"Vector4i(1, 2, 3, 4)","type":13,"var_to_str":"Vector4i(1, 2, 3, 4)"}
+{"hex":"0e000000000000000000803f000000000000a040","literal":"Plane(0, 1, 0, 5)","type":14,"var_to_str":"Plane(0, 1, 0, 5)"}
+{"hex":"0f0000000000000000000000000000000000803f","literal":"Quaternion(0, 0, 0, 1)","type":15,"var_to_str":"Quaternion(0, 0, 0, 1)"}
+{"hex":"100000000000803f0000004000004040000080400000a0400000c040","literal":"AABB(1, 2, 3, 4, 5, 6)","type":16,"var_to_str":"AABB(1, 2, 3, 4, 5, 6)"}
+{"hex":"110000000000803f0000004000004040000080400000a0400000c0400000e0400000004100001041","literal":"Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)","type":17,"var_to_str":"Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)"}
+{"hex":"120000000000803f0000004000004040000080400000a0400000c0400000e0400000004100001041000020410000304100004041","literal":"Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)","type":18,"var_to_str":"Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)"}
+{"hex":"130000000000803f0000004000004040000080400000a0400000c0400000e040000000410000104100002041000030410000404100005041000060410000704100008041","literal":"Projection(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)","type":19,"var_to_str":"Projection(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)"}
+{"hex":"140000000000003f0000803e0000803f0000803f","literal":"Color(0.5, 0.25, 1, 1)","type":20,"var_to_str":"Color(0.5, 0.25, 1, 1)"}
+{"hex":"150000000d000000656e656d795f737061776e6564000000","literal":"&\"enemy_spawned\"","type":21,"var_to_str":"&\"enemy_spawned\""}
+{"hex":"1600000002000080000000000000000006000000506c617965720000070000004869744172656100","literal":"NodePath(\"Player/HitArea\")","type":22,"var_to_str":"NodePath(\"Player/HitArea\")"}
+{"hex":"1600000002000080020000000100000004000000726f6f74040000004d61696e08000000706f736974696f6e0100000078000000","literal":"NodePath(\"/root/Main:position:x\")","type":22,"var_to_str":"NodePath(\"/root/Main:position:x\")"}
+{"hex":"16000000000000800100000000000000080000006d6f64756c617465","literal":"NodePath(\":modulate\")","type":22,"var_to_str":"NodePath(\":modulate\")"}
+{"hex":"16000000010000800000000000000000010000002e000000","literal":"NodePath(\".\")","type":22,"var_to_str":"NodePath(\".\")"}
+{"hex":"1c00000000000000","literal":"[]","type":28,"var_to_str":"[]"}
+{"hex":"1c000000030000000200000001000000040000000100000061000000050000000000803f00000040","literal":"[1, \"a\", Vector2(1, 2)]","type":28,"var_to_str":"[1, \"a\", Vector2(1, 2)]"}
+{"hex":"1c000100020000000200000002000000010000000200000002000000","literal":"Array[int]([1, 2])","type":28,"var_to_str":"Array[int]([1, 2])"}
+{"hex":"1c0001000400000002000000040000000100000078000000040000000100000079000000","literal":"Array[String]([\"x\", \"y\"])","type":28,"var_to_str":"Array[String]([\"x\", \"y\"])"}
+{"hex":"1c00020011000000456e636f6465644f626a6563744173494400000000000000","literal":"Array[Node]([])","type":28,"var_to_str":"Array[Node]([])"}
+{"hex":"1b00000000000000","literal":"{}","type":27,"var_to_str":"{}"}
+{"hex":"1b00000002000000040000000100000061000000020000000100000002000000020000001c000000010000000200000003000000","literal":"{\"a\": 1, 2: [3]}","type":27,"var_to_str":"{\n2: [3],\n\"a\": 1\n}"}
+{"hex":"1b0005000400000002000000010000000400000001000000610000000200000001000000","literal":"Dictionary[String, int]({\"a\": 1})","type":27,"var_to_str":"Dictionary[String, int]({\n\"a\": 1\n})"}
+{"hex":"1d0000000300000001020300","literal":"PackedByteArray(1, 2, 3)","type":29,"var_to_str":"PackedByteArray(1, 2, 3)"}
+{"hex":"1e0000000200000001000000feffffff","literal":"PackedInt32Array(1, -2)","type":30,"var_to_str":"PackedInt32Array(1, -2)"}
+{"hex":"1f000000020000000100000000000000ffffffffffffff7f","literal":"PackedInt64Array(1, 9223372036854775807)","type":31,"var_to_str":"PackedInt64Array(1, 9223372036854775807)"}
+{"hex":"20000000020000000000c03f000080be","literal":"PackedFloat32Array(1.5, -0.25)","type":32,"var_to_str":"PackedFloat32Array(1.5, -0.25)"}
+{"hex":"21000000020000009a9999999999b93f0000000000000040","literal":"PackedFloat64Array(0.1, 2)","type":33,"var_to_str":"PackedFloat64Array(0.1, 2)"}
+{"hex":"220000000200000002000000610000000300000062630000","literal":"PackedStringArray(\"a\", \"bc\")","type":34,"var_to_str":"PackedStringArray(\"a\", \"bc\")"}
+{"hex":"23000000020000000000803f000000400000404000008040","literal":"PackedVector2Array(1, 2, 3, 4)","type":35,"var_to_str":"PackedVector2Array(1, 2, 3, 4)"}
+{"hex":"24000000010000000000803f0000004000004040","literal":"PackedVector3Array(1, 2, 3)","type":36,"var_to_str":"PackedVector3Array(1, 2, 3)"}
+{"hex":"25000000010000000000803f00000000000000000000803f","literal":"PackedColorArray(1, 0, 0, 1)","type":37,"var_to_str":"PackedColorArray(1, 0, 0, 1)"}
+{"hex":"26000000010000000000803f000000400000404000008040","literal":"PackedVector4Array(1, 2, 3, 4)","type":38,"var_to_str":"PackedVector4Array(1, 2, 3, 4)"}
+{"hex":"05000000cdcccc3d9a99993e","literal":"Vector2(0.1, 0.3)","type":5,"var_to_str":"Vector2(0.1, 0.3)"}
+{"hex":"14000000cdcccc3dcdcc4c3e9a99993ecdcccc3e","literal":"Color(0.1, 0.2, 0.3, 0.4)","type":20,"var_to_str":"Color(0.1, 0.2, 0.3, 0.4)"}
+{"hex":"03000100f168e388b5f8e43e","literal":"1e-05","type":3,"var_to_str":"1e-05"}
+{"hex":"0300010000000054346f9d41","literal":"123456789.0","type":3,"var_to_str":"123456789.0"}
+{"hex":"0300000000004040","literal":"3.0","type":3,"var_to_str":"3.0"}
+{"hex":"0300000000000080","literal":"-0.0","type":3,"var_to_str":"0.0"}
+{"hex":"1b0000000200000004000000010000006200000002000000020000000400000001000000610000000200000001000000","literal":"{\"b\": 2, \"a\": 1}","type":27,"var_to_str":"{\n\"a\": 1,\n\"b\": 2\n}"}

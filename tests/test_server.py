@@ -1,5 +1,6 @@
 """Tests for the MCP server — tool dispatch with mocked LSP client."""
 
+import asyncio
 import io
 import json
 import subprocess
@@ -25,7 +26,7 @@ from godotlens_mcp.server import (
 # ---------------------------------------------------------------------------
 
 def test_list_tools_count():
-    assert len(TOOLS) == 33
+    assert len(TOOLS) == 49
 
 
 def test_list_tools_names():
@@ -64,6 +65,22 @@ def test_list_tools_names():
         "debug_run",
         "gdscript_find",
         "project_config",
+        "project_validate",
+        "runtime_run",
+        "runtime_stop",
+        "runtime_status",
+        "runtime_output",
+        "runtime_tree",
+        "runtime_inspect",
+        "runtime_set",
+        "runtime_eval",
+        "runtime_input",
+        "runtime_reload",
+        "runtime_pause",
+        "runtime_time_scale",
+        "runtime_step",
+        "runtime_monitors",
+        "runtime_screenshot",
     }
     assert names == expected
 
@@ -140,7 +157,7 @@ async def test_tools_list_response():
     msg = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     resp = await handle_request(msg)
     tools = resp["result"]["tools"]
-    assert len(tools) == 33
+    assert len(tools) == 49
     assert tools[0]["name"] == "gdscript_status"
 
 
@@ -174,6 +191,7 @@ def _mock_lsp():
     lsp.notify = AsyncMock()
     lsp.drain_notifications = AsyncMock()
     lsp.diagnostics_cache = {}
+    lsp.document_lock = asyncio.Lock()
     return lsp
 
 
@@ -448,4 +466,4 @@ def test_stdio_integration_initialize_and_tools_list():
 
     tools_response = json.loads(lines[1])
     assert tools_response["id"] == 2
-    assert len(tools_response["result"]["tools"]) == 33
+    assert len(tools_response["result"]["tools"]) == 49

@@ -157,6 +157,68 @@ async def test_concurrent_requests_do_not_interleave(connected_client, fake_lsp)
     assert all(r == {"contents": "concurrent"} for r in results)
 
 
+async def test_requests_are_answered_while_notifications_stream(fake_lsp):
+    """Unsolicited traffic must never stall a call or the connection handshake."""
+    fake_lsp.stream_interval = 0.05
+    fake_lsp.responses["textDocument/hover"] = {"contents": "streaming"}
+    client = LSPClient(port=fake_lsp.port, timeout=5.0)
+    ok, msg = await asyncio.wait_for(client.connect(), timeout=5)
+    assert ok, msg
+    try:
+        result = await asyncio.wait_for(client.request("textDocument/hover", {}), timeout=5)
+        assert result == {"contents": "streaming"}
+    finally:
+        await client.disconnect()
+
+
+async def test_wait_for_diagnostics_is_bounded_under_a_stream(fake_lsp):
+    fake_lsp.stream_interval = 0.05
+    client = LSPClient(port=fake_lsp.port, timeout=5.0)
+    assert (await client.connect())[0]
+    try:
+        loop = asyncio.get_event_loop()
+        started = loop.time()
+        missing = await asyncio.wait_for(
+            client.wait_for_diagnostics(["never-published"], timeout=1.0), timeout=5)
+        assert missing == {"never-published"}
+        assert loop.time() - started < 2.0
+    finally:
+        await client.disconnect()
+
+
+async def test_an_idle_client_keeps_reading(fake_lsp):
+    """A multi-megabyte burst with no call in flight must be accepted in full.
+
+    Godot's language server writes from the editor's main thread and spins until the
+    socket takes every byte, so a client that stops reading freezes the editor.
+    """
+    fake_lsp.burst_after_connect = [
+        {"jsonrpc": "2.0", "method": "window/logMessage",
+         "params": {"type": 3, "message": "x" * 4000}}
+        for _ in range(1000)
+    ]
+    client = LSPClient(port=fake_lsp.port, timeout=5.0)
+    assert (await client.connect())[0]
+    try:
+        await asyncio.wait_for(fake_lsp.burst_done.wait(), timeout=15)
+    finally:
+        await client.disconnect()
+
+
+async def test_reconnect_forgets_documents_opened_on_the_dead_connection(fake_lsp):
+    """Document ownership is per connection; a new one must start from nothing open."""
+    client = LSPClient(port=fake_lsp.port, timeout=5.0)
+    assert (await client.connect())[0]
+    try:
+        await client.sync_document("file:///C:/proj/a.gd", "extends Node\n")
+        assert client.is_open("file:///C:/proj/a.gd")
+        client.writer.close()  # the peer is gone, as when the editor restarts
+        assert (await client.connect())[0]
+        assert not client.is_open("file:///C:/proj/a.gd")
+    finally:
+        await client.disconnect()
+
+
 async def test_initialize_sends_root_path_and_uri(fake_lsp, godot_project, monkeypatch):
     """Godot <=4.4 compares rootPath, so omitting it caused a workspace mismatch."""
     monkeypatch.chdir(godot_project)

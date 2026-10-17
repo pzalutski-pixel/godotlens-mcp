@@ -10,7 +10,7 @@ path = "src/godotlens_mcp/__init__.py"
 [project]
 name = "godotlens-mcp"
 dynamic = ["version"]
-description = "MCP server giving AI agents Godot's own view of a GDScript project: navigation, diagnostics, engine API, and scene verification"
+description = "MCP server giving AI agents Godot's own view of a GDScript project, and a running game to observe and drive"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -54,6 +54,7 @@ asyncio_mode = "auto"
 timeout = 120
 markers = [
     "integration: requires a real Godot binary (skipped when none is found)",
+    "windowed: opens a game window; runs only with GODOTLENS_WINDOWED_TESTS=1 or under Xvfb",
 ]
 
 [tool.ruff]

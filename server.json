@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pzalutski-pixel/godotlens",
   "title": "GodotLens",
-  "description": "Godot's own view of your GDScript project: navigation, diagnostics, engine API, scene checks",
+  "description": "Godot's own view of your GDScript project: code, scenes, and the running game",
   "repository": {
     "url": "https://github.com/pzalutski-pixel/godotlens-mcp",
     "source": "github"
   },
-  "version": "1.1.1",
+  "version": "1.2.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "godotlens-mcp",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -44,7 +44,7 @@
         },
         {
           "name": "GODOT_BIN",
-          "description": "Godot executable, required by scene_* and project_config",
+          "description": "Godot executable, required by scene_*, project_config and runtime_*",
           "format": "string"
         },
         {
@@ -74,13 +74,19 @@
           "description": "Max files gdscript_find inspects across the project",
           "format": "number",
           "default": "60"
+        },
+        {
+          "name": "GODOT_RUNTIME_MAX_SESSIONS",
+          "description": "Max games runtime_run keeps running at once",
+          "format": "number",
+          "default": "4"
         }
       ]
     },
     {
       "registryType": "pypi",
       "identifier": "godotlens-mcp",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -112,7 +118,7 @@
         },
         {
           "name": "GODOT_BIN",
-          "description": "Godot executable, required by scene_* and project_config",
+          "description": "Godot executable, required by scene_*, project_config and runtime_*",
           "format": "string"
         },
         {
@@ -142,6 +148,12 @@
           "description": "Max files gdscript_find inspects across the project",
           "format": "number",
           "default": "60"
+        },
+        {
+          "name": "GODOT_RUNTIME_MAX_SESSIONS",
+          "description": "Max games runtime_run keeps running at once",
+          "format": "number",
+          "default": "4"
         }
       ]
     }

@@ -23,9 +23,10 @@ ENV_VARS = {
     "GODOT_LSP_HOST", "GODOT_LSP_PORT", "GODOT_DAP_HOST", "GODOT_DAP_PORT",
     "GODOT_BIN", "GODOT_PROJECT_ROOT", "GODOT_LSP_TIMEOUT",
     "GODOT_DIAGNOSTICS_TIMEOUT", "GODOT_VERSION", "GODOT_FIND_FILE_LIMIT",
+    "GODOT_RUNTIME_MAX_SESSIONS",
 }
 
-TOOL_PATTERN = re.compile(r"`((?:gdscript|scene|debug|project)_[a-z_]+)`")
+TOOL_PATTERN = re.compile(r"`((?:gdscript|scene|debug|project|runtime)_[a-z_]+)`")
 
 
 def tool_names() -> set[str]:

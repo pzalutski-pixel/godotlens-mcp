@@ -5,22 +5,26 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/pzalutski-pixel/godotlens-mcp/blob/main/LICENSE)
 
 An MCP server that gives AI agents **Godot's own view** of a GDScript project — navigation,
-diagnostics, engine API, scene verification, and runtime output — by bridging the language
-server and debug adapter the Godot editor already runs.
+diagnostics, engine API and scene verification from the engine itself — and lets them run the
+game, look at it and drive it: the live scene tree, values, errors, input, hot reload and
+screenshots.
 
 ## Requirements
 
 | | Needed for |
 |---|---|
-| **Godot 4.6+**, editor open on your project | everything (the LSP and debug adapter live in the editor) |
+| **Godot 4.6+**, editor open on your project | `gdscript_*` and `debug_*` (the LSP and debug adapter live in the editor) |
+| A Godot **binary** via `GODOT_BIN`, `./godot/`, or PATH | `scene_*`, `project_*` and `runtime_*`, which run the engine themselves |
 | **Python 3.10+** on PATH | this npm wrapper spawns the bundled server |
-| A Godot **binary** via `GODOT_BIN`, `./godot/`, or PATH | `scene_*` and `project_config`, which run the engine to resolve scenes and settings |
 
 Godot 4.6 is the floor because the language server's behaviour changed materially at 4.5
 (URI encoding) and 4.6 (document ownership). Older versions are refused with a clear
 message rather than silently misread.
 
-The editor does not need a visible window:
+Turn on **Import Resources When Unfocused** in Editor Settings: an agent-driven editor never
+gains focus, so without it new `class_name` scripts and assets are not registered. Games that
+`runtime_run` launches run headless, beside your editor, one per agent. For CI, the editor
+does not need a visible window:
 
 ```bash
 godot --path <project> --editor --headless --lsp-port 6005 --dap-port 6006
@@ -60,16 +64,19 @@ wired by name inside a `.tscn`. Every answer here comes from the engine.
 
 ## Tools
 
-33 tools. Line and character parameters are **0-indexed** throughout.
+49 tools. Line and character parameters are **0-indexed** throughout.
 
 - **Navigation** — `gdscript_find` (by name), `gdscript_definition`, `gdscript_references`,
   `gdscript_references_in_file`, `gdscript_hover`, `gdscript_symbols`, `gdscript_signature_help`
 - **Authoring** — `gdscript_engine_api`, `gdscript_complete` (scene-aware), `gdscript_validate`
   (check content before writing it to disk)
 - **Refactoring** — `gdscript_rename`
-- **Project & scenes** — `project_config`, `scene_state`, `scene_validate`
-- **Runtime** — `debug_run`, `debug_output`, `debug_set_breakpoints`, `debug_stack_trace`,
-  `debug_inspect`, `debug_evaluate`, plus execution control
+- **Project & scenes** — `project_config`, `project_validate`, `scene_state`, `scene_validate`
+- **Debugger (your editor)** — `debug_run`, `debug_output`, `debug_set_breakpoints`,
+  `debug_stack_trace`, `debug_inspect`, `debug_evaluate`, plus execution control
+- **Runtime (games GodotLens launches)** — `runtime_run`, `runtime_tree`, `runtime_inspect`,
+  `runtime_set`, `runtime_eval`, `runtime_input`, `runtime_output`, `runtime_reload`, `runtime_screenshot`, `runtime_monitors`,
+  `runtime_pause`, `runtime_time_scale`, `runtime_step`, `runtime_status`, `runtime_stop`
 - **Sync & diagnostics** — `gdscript_sync_file`, `gdscript_sync_files`, `gdscript_diagnostics`,
   `gdscript_release_file`, batch variants
 
@@ -91,6 +98,7 @@ Godot never reported back — **not** that the file is clean.
 | `GODOT_DIAGNOSTICS_TIMEOUT` | `8` | Seconds to wait for diagnostics after a sync |
 | `GODOT_VERSION` | auto | Override capability detection |
 | `GODOT_FIND_FILE_LIMIT` | `60` | Max files `gdscript_find` inspects when searching the whole project |
+| `GODOT_RUNTIME_MAX_SESSIONS` | `4` | Max games `runtime_run` keeps running at once |
 
 ## Documentation
 

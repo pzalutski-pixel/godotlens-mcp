@@ -69,29 +69,70 @@ def test_missing_handler_is_reported():
     assert problem["script"] == "res://player.gd"
 
 
+def _with_root(*nodes):
+    root = {"path": ".", "name": "Main", "type": "Node2D", "script": None, "properties": {}}
+    return [root, *nodes]
+
+
+BUTTON = {"path": "X", "name": "X", "type": "Button", "script": None, "properties": {}}
+
+
+def _kinds(report):
+    return [problem["kind"] for problem in report["problems"]]
+
+
 def test_connection_to_a_scriptless_node_is_reported():
+    bare = {"path": "Bare", "name": "Bare", "type": "Node2D", "script": None, "properties": {}}
     scene = {
-        "nodes": [{"path": "Bare", "name": "Bare", "type": "Node2D", "script": None,
-                   "properties": {}}],
-        "connections": [{"signal": "pressed", "from": "X", "to": "Bare", "method": "_on_pressed"}],
+        "nodes": _with_root(BUTTON, bare),
+        "connections": [{"signal": "pressed", "from": "X", "to": "Bare", "method": "_on_pressed",
+                         "facts": {"signal_exists": True, "signal_args": 0, "method_native": False}}],
     }
-    report = validate_scene(scene, {})
-    assert report["problems"][0]["kind"] == "target_has_no_script"
+    assert _kinds(validate_scene(scene, {})) == ["target_has_no_script"]
+
+
+def test_a_native_method_on_a_scriptless_node_is_a_valid_handler():
+    """Regression: connecting to an engine method such as queue_free was flagged."""
+    scene = {
+        "nodes": _with_root(BUTTON),
+        "connections": [{"signal": "pressed", "from": "X", "to": ".", "method": "queue_free",
+                         "facts": {"signal_exists": True, "signal_args": 0, "method_native": True}}],
+    }
+    assert validate_scene(scene, {})["valid"] is True
 
 
 def test_connection_to_a_missing_node_is_reported():
     scene = {
-        "nodes": [{"path": ".", "name": "Main", "type": "Node2D", "script": None, "properties": {}}],
+        "nodes": _with_root(BUTTON),
         "connections": [{"signal": "pressed", "from": "X", "to": "Ghost", "method": "_on_pressed"}],
     }
-    report = validate_scene(scene, {})
-    assert report["problems"][0]["kind"] == "missing_target_node"
+    assert _kinds(validate_scene(scene, {})) == ["missing_target_node"]
 
 
 def test_unknown_symbols_do_not_produce_false_positives():
     """If the LSP could not report a script's symbols, say nothing rather than guess."""
     report = validate_scene(SCENE, {})  # no symbol info at all
     assert report["valid"] is True
+
+
+def test_targets_are_resolved_through_the_merged_view():
+    """A node from a base scene is typeless and scriptless in the file itself.
+
+    Regression: validating against the raw per-file nodes reported every connection
+    to such a node as target_has_no_script.
+    """
+    scene = {
+        "nodes": [{"path": ".", "name": "Base", "type": "", "script": None, "properties": {}}],
+        "resolved_nodes": [{"path": ".", "type": "Node2D", "script": "res://handler.gd",
+                            "origin": "instance:res://base.tscn"},
+                           {"path": "Button", "type": "Button", "script": None,
+                            "origin": "instance:res://base.tscn"}],
+        "connections": [{"signal": "pressed", "from": "Button", "to": ".",
+                         "method": "_on_button_pressed"}],
+    }
+    report = validate_scene(scene, {"res://handler.gd": {"_on_button_pressed"}})
+    assert report["valid"] is True, report["problems"]
+    assert collect_scripts(scene) == ["res://handler.gd"]
 
 
 def test_to_res_path_conversions(tmp_path):
@@ -167,6 +208,122 @@ async def test_validate_catches_a_handler_renamed_out_from_under_a_scene(
     broken = validate_scene(scene, {"res://player.gd": {"_on_hit_area_entered_v2", "take_damage"}})
     assert broken["valid"] is False
     assert broken["problems"][0]["method"] == "_on_hit_area_entered"
+
+
+INHERITED_AND_INSTANCED = [
+    "res://inherited.tscn", "res://instancer.tscn", "res://nested.tscn", "res://editable.tscn"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_dump_resolves_nodes_from_base_and_instanced_scenes(
+        godot_binary, godot_project, monkeypatch):
+    monkeypatch.setenv("GODOT_BIN", godot_binary)
+    dump = await dump_scenes(INHERITED_AND_INSTANCED, str(godot_project))
+    assert not dump["errors"], dump["errors"]
+
+    def resolved(scene_path):
+        return {n["path"]: n for n in dump["scenes"][scene_path]["resolved_nodes"]}
+
+    inherited = resolved("res://inherited.tscn")
+    assert inherited["."]["type"] == "Node2D"
+    assert inherited["."]["script"] == "res://handler.gd"
+    assert inherited["Button"]["type"] == "Button"
+
+    nested = resolved("res://nested.tscn")
+    assert nested["Outer/Child"]["script"] == "res://handler.gd"
+    assert nested["Outer/Child/Button"]["origin"] == "instance:res://base.tscn"
+
+    editable = resolved("res://editable.tscn")
+    assert editable["Child/Panel/Extra"]["type"] == "Label"
+    assert editable["Child/Panel/Extra"]["origin"] == "this_file"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_validate_accepts_correct_connections_into_other_scenes(
+        godot_binary, godot_project, monkeypatch):
+    monkeypatch.setenv("GODOT_BIN", godot_binary)
+    dump = await dump_scenes(INHERITED_AND_INSTANCED, str(godot_project))
+    symbols = {"res://handler.gd": {"_on_button_pressed"}}
+
+    for path in INHERITED_AND_INSTANCED:
+        report = validate_scene(dump["scenes"][path], symbols)
+        assert report["valid"] is True, f"{path}: {report['problems']}"
+        assert report["connections_checked"] == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_validate_still_flags_a_missing_handler_in_a_base_scene_script(
+        godot_binary, godot_project, monkeypatch):
+    monkeypatch.setenv("GODOT_BIN", godot_binary)
+    dump = await dump_scenes(["res://inherited.tscn"], str(godot_project))
+    report = validate_scene(dump["scenes"]["res://inherited.tscn"],
+                            {"res://handler.gd": {"_on_button_renamed"}})
+    assert report["valid"] is False
+    assert report["problems"][0]["kind"] == "missing_handler"
+    assert report["problems"][0]["script"] == "res://handler.gd"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_script_that_uses_an_autoload_compiles_in_the_dump(
+        godot_binary, godot_project, monkeypatch):
+    """Loaded before autoloads are registered, it failed with 'Identifier not found'."""
+    monkeypatch.setenv("GODOT_BIN", godot_binary)
+    dump = await dump_scenes(["res://autoload_user.tscn"], str(godot_project))
+    facts = dump["scenes"]["res://autoload_user.tscn"]["scripts"]["res://autoload_user.gd"]
+    assert facts["compiled"] is True
+    assert facts["base_type"] == "Node"
+
+
+from tests.scene_mistakes import MISTAKES  # noqa: E402
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_each_kind_of_scene_mistake_is_reported_and_nothing_else(
+        godot_binary, godot_project, monkeypatch):
+    """One scene per mistake Godot accepts silently; each yields exactly its own kind."""
+    monkeypatch.setenv("GODOT_BIN", godot_binary)
+    paths = [f"res://mistakes/{name}" for name in MISTAKES]
+    dump = await dump_scenes(paths, str(godot_project))
+    assert not dump["errors"], dump["errors"]
+
+    wrong = {}
+    for name, (expected, _) in MISTAKES.items():
+        report = validate_scene(dump["scenes"][f"res://mistakes/{name}"], {})
+        kinds = [problem["kind"] for problem in report["problems"]]
+        if kinds != [expected]:
+            wrong[name] = kinds
+    assert not wrong, f"expected exactly one problem each; got {wrong}"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_correct_scene_has_no_problems_even_where_naive_checks_misfire(
+        godot_binary, godot_project, monkeypatch):
+    monkeypatch.setenv("GODOT_BIN", godot_binary)
+    dump = await dump_scenes(["res://mistakes/correct.tscn"], str(godot_project))
+    report = validate_scene(dump["scenes"]["res://mistakes/correct.tscn"], {})
+    assert report["problems"] == [], report["problems"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_engine_runs_leave_the_projects_own_logs_alone(godot_binary, godot_project, monkeypatch):
+    """Godot keeps only the newest five logs per project; GodotLens's runs must not
+    push the developer's own logs out."""
+    from godotlens_mcp.scene import dump_project, validate_project
+    from tests.conftest import log_snapshot
+
+    monkeypatch.setenv("GODOT_BIN", godot_binary)
+    before = log_snapshot("GodotLensTest")
+    await dump_scenes(["res://main.tscn"], str(godot_project))
+    await dump_project(str(godot_project))
+    await validate_project(str(godot_project))
+    assert log_snapshot("GodotLensTest") == before
 
 
 @pytest.mark.integration

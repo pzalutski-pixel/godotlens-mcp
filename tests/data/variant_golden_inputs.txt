@@ -1,0 +1,69 @@
+# One Godot value literal per line (str_to_var syntax). Covers every type the
+# debugger protocol carries that has a text form; Object IDs, RIDs and Signals have
+# none and are covered by hand-built frames in tests/test_variant.py.
+null
+true
+false
+0
+1
+-1
+2147483647
+2147483648
+-2147483649
+9223372036854775807
+0.0
+1.5
+-2.25
+0.1
+1e+300
+""
+"a"
+"abcd"
+"héllo ✓"
+Vector2(1.5, 2)
+Vector2i(3, -4)
+Rect2(1, 2, 3, 4.5)
+Rect2i(1, 2, 3, 4)
+Vector3(1, 2, 3)
+Vector3i(-1, 0, 7)
+Transform2D(1, 2, 3, 4, 5, 6)
+Vector4(1, 2, 3, 4)
+Vector4i(1, 2, 3, 4)
+Plane(0, 1, 0, 5)
+Quaternion(0, 0, 0, 1)
+AABB(1, 2, 3, 4, 5, 6)
+Basis(1, 2, 3, 4, 5, 6, 7, 8, 9)
+Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+Projection(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+Color(0.5, 0.25, 1, 1)
+&"enemy_spawned"
+NodePath("Player/HitArea")
+NodePath("/root/Main:position:x")
+NodePath(":modulate")
+NodePath(".")
+[]
+[1, "a", Vector2(1, 2)]
+Array[int]([1, 2])
+Array[String](["x", "y"])
+Array[Node]([])
+{}
+{"a": 1, 2: [3]}
+Dictionary[String, int]({"a": 1})
+PackedByteArray(1, 2, 3)
+PackedInt32Array(1, -2)
+PackedInt64Array(1, 9223372036854775807)
+PackedFloat32Array(1.5, -0.25)
+PackedFloat64Array(0.1, 2)
+PackedStringArray("a", "bc")
+PackedVector2Array(1, 2, 3, 4)
+PackedVector3Array(1, 2, 3)
+PackedColorArray(1, 0, 0, 1)
+PackedVector4Array(1, 2, 3, 4)
+# Inexact float32 components and float formatting edge cases.
+Vector2(0.1, 0.3)
+Color(0.1, 0.2, 0.3, 0.4)
+1e-05
+123456789.0
+3.0
+-0.0
+{"b": 2, "a": 1}

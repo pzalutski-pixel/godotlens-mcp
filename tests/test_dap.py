@@ -252,6 +252,21 @@ async def test_evaluate_without_a_frame_omits_frame_id(dap_client, fake_dap):
     assert "frameId" not in sent["arguments"]
 
 
+async def test_an_unanswered_expression_is_resent_with_different_text(dap_client, fake_dap):
+    """Godot never forwards a repeat of an expression text it left unanswered."""
+    fake_dap.silent_methods = {"evaluate"}
+    with pytest.raises(DAPTimeout):
+        await dap_client.evaluate("hp", frame_id=0, timeout=0.3)
+
+    fake_dap.silent_methods = set()
+    fake_dap.bodies["evaluate"] = {"result": "100"}
+    assert (await dap_client.evaluate("hp", frame_id=0))["result"] == "100"
+
+    sent = [m["arguments"]["expression"] for m in fake_dap.received
+            if m.get("command") == "evaluate"]
+    assert sent == ["hp", "(hp)"]
+
+
 async def test_terminate_marks_the_session_finished(dap_client, fake_dap):
     await dap_client.terminate()
     assert dap_client.terminated is True
@@ -265,6 +280,121 @@ async def test_requests_are_serialized(dap_client, fake_dap):
 
     seqs = [m["seq"] for m in fake_dap.received if m.get("type") == "request"]
     assert len(seqs) == len(set(seqs)), "sequence numbers must be unique"
+
+
+# ---------------------------------------------------------------------------
+# A game that keeps talking
+# ---------------------------------------------------------------------------
+#
+# Regression: the client read only inside calls and "drained" until the stream went
+# quiet, with no overall deadline. A game printing more than once per wait window
+# made connect(), debug_output and debug_run never return, and because the MCP server
+# handles calls one at a time, every subagent stalled with it.
+
+
+async def _streaming_client(fake_dap, interval=0.1) -> DAPClient:
+    fake_dap.stream_interval = interval
+    client = DAPClient(port=fake_dap.port, timeout=5.0)
+    ok, message = await asyncio.wait_for(client.connect(), timeout=5)
+    assert ok, message
+    return client
+
+
+async def test_connect_returns_while_the_adapter_streams_events(fake_dap):
+    client = await _streaming_client(fake_dap)
+    await client.disconnect()
+
+
+async def test_drain_events_is_bounded_under_a_steady_stream(fake_dap):
+    client = await _streaming_client(fake_dap)
+    try:
+        loop = asyncio.get_event_loop()
+        started = loop.time()
+        arrived = await asyncio.wait_for(client.drain_events(1.0), timeout=5)
+        assert loop.time() - started < 2.0
+        assert arrived > 0, "events kept arriving but none were recorded"
+    finally:
+        await client.disconnect()
+
+
+async def test_requests_are_answered_while_events_stream(fake_dap):
+    client = await _streaming_client(fake_dap)
+    try:
+        fake_dap.bodies["threads"] = {"threads": [{"id": 1, "name": "Main"}]}
+        assert await asyncio.wait_for(client.threads(), timeout=5) == [{"id": 1, "name": "Main"}]
+    finally:
+        await client.disconnect()
+
+
+async def test_collect_output_is_bounded_under_a_steady_stream(fake_dap):
+    client = await _streaming_client(fake_dap)
+    try:
+        lines = await asyncio.wait_for(client.collect_output(1.0), timeout=5)
+        assert lines, "the streamed output was not collected"
+    finally:
+        await client.disconnect()
+
+
+async def test_an_idle_client_keeps_reading(fake_dap):
+    """Nothing calls the client, yet a multi-megabyte burst must be accepted in full.
+
+    Godot's adapter writes from the editor's main thread and spins until the socket
+    takes every byte, so a client that stops reading freezes the editor.
+    """
+    fake_dap.burst_after_connect = [
+        {"seq": 0, "type": "event", "event": "output",
+         "body": {"category": "stdout", "output": "x" * 4000 + "\n"}}
+        for _ in range(1000)
+    ]
+    client = DAPClient(port=fake_dap.port, timeout=5.0)
+    assert (await client.connect())[0]
+    try:
+        await asyncio.wait_for(fake_dap.burst_done.wait(), timeout=15)
+        from godotlens_mcp.dap_client import MAX_EVENTS
+        assert 0 < len(client.output) <= MAX_EVENTS
+    finally:
+        await client.disconnect()
+
+
+async def test_a_stale_terminated_does_not_end_a_new_launch(dap_client, fake_dap):
+    """A terminated left over from an earlier session must not mark the new game done.
+
+    Godot never sends terminated to the launching client while launch is pending, so
+    one that arrives then belongs to something earlier.
+    """
+    fake_dap.push_events = [{"seq": 1, "type": "event", "event": "terminated", "body": {}}]
+    await dap_client.launch("/proj")
+    assert dap_client.terminated is False
+
+
+async def test_launch_opts_in_to_structured_messages_and_passes_play_args(dap_client, fake_dap):
+    await dap_client.launch("/proj", play_args=["--headless", "--fixed-fps", "60"])
+    sent = next(m for m in fake_dap.received if m.get("command") == "launch")
+    assert sent["arguments"]["godot/custom_data"] is True
+    assert sent["arguments"]["playArgs"] == ["--headless", "--fixed-fps", "60"]
+
+
+async def test_structured_errors_are_decoded_and_other_custom_data_dropped(dap_client, fake_dap):
+    """push_error and engine errors arrive only as godot/custom_data 'error' messages."""
+    error = [0, 0, 5, 130, "core/variant/variant_utility.cpp", "push_error", 1100,
+             "Enemy count is wrong", "", False, 6,
+             "res://main.gd", "_ready", 12, "res://spawner.gd", "spawn", 30]
+    fake_dap.push_events = [
+        {"seq": 1, "type": "event", "event": "godot/custom_data",
+         "body": {"message": "performance:profile_frame", "data": [60.0, 0.016]}},
+        {"seq": 2, "type": "event", "event": "godot/custom_data",
+         "body": {"message": "error", "data": error}},
+    ]
+    fake_dap.bodies["threads"] = {"threads": []}
+    await dap_client.threads()
+
+    errors = dap_client.take_errors()
+    assert len(errors) == 1
+    assert errors[0]["file"] == "res://main.gd", "location must come from the script stack"
+    assert errors[0]["line"] == 11
+    assert errors[0]["message"] == "Enemy count is wrong"
+    assert [frame["function"] for frame in errors[0]["stack"]] == ["_ready", "spawn"]
+    assert dap_client.take_errors() == [], "errors are drained like output"
 
 
 # ---------------------------------------------------------------------------

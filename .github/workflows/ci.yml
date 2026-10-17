@@ -73,10 +73,9 @@ jobs:
           unzip -q godot.zip
           chmod +x "${{ matrix.binary }}" 2>/dev/null || true
 
-      # The editor runs headless via its own flag, but debug_run asks it to spawn a
-      # *game*, and that child process still wants a display. Windows and macOS
-      # runners provide one; a bare Linux runner does not, so the game starts, exits
-      # immediately, and produces no output. Xvfb gives it somewhere to draw.
+      # Every game the integration tests start runs headless, except the screenshot
+      # test (marker: windowed), which needs real pixels. Under xvfb-run DISPLAY is
+      # set, which is what lets that test run on Linux; elsewhere it is skipped.
       - name: Provide a virtual display (Linux)
         if: runner.os == 'Linux'
         run: |

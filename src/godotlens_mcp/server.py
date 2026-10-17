@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -14,6 +15,7 @@ from godotlens_mcp.dap_client import (
     DAPTimeout,
 )
 from godotlens_mcp.lsp_client import (
+    DEFAULT_TIMEOUT,
     LSPClient,
     LSPConnectionLost,
     LSPError,
@@ -25,11 +27,15 @@ from godotlens_mcp.lsp_client import (
     file_uri,
     find_project_root,
 )
+from godotlens_mcp.runtime import tools as runtime_tools
+from godotlens_mcp.runtime.session import SessionError
 from godotlens_mcp.scene import (
     GodotBinaryNotFound,
     collect_scripts,
     dump_project,
     dump_scenes,
+    to_res_path,
+    validate_project,
     validate_scene,
 )
 
@@ -54,16 +60,43 @@ DAP_HOST = os.environ.get("GODOT_DAP_HOST", "127.0.0.1")
 # server for minutes; callers are told when the cap applied.
 FIND_FILE_LIMIT = int(os.environ.get("GODOT_FIND_FILE_LIMIT", "60"))
 
+# How long to wait for the editor to register a class_name file it has never seen.
+# With "Import Resources When Unfocused" on, the editor rescans every 0.5 s.
+NEW_CLASS_WAIT = 3.0
+
+# The analyzer's wording for a name it cannot resolve (gdscript_analyzer.cpp).
+_UNDECLARED = re.compile(
+    r'(?:Identifier|Could not find type|Could not find base class) "([A-Za-z_]\w*)"')
+# Only decides which names to wait for; whether a class exists is Godot's answer.
+_CLASS_NAME = re.compile(r"^\s*class_name\s+([A-Za-z_]\w*)", re.MULTILINE)
+
+UNREGISTERED_CLASS_HINT = (
+    "Godot has not registered these new class_name files yet, so every script using "
+    "them reports the name as undeclared and the game will fail to parse. The editor "
+    "registers new files only when its window gains focus, unless the editor setting "
+    "'Import Resources When Unfocused' is on (interface/editor/behavior/"
+    "import_resources_when_unfocused; on 4.6 interface/editor/"
+    "import_resources_when_unfocused), which rescans every 0.5 s. Turn it on, or focus "
+    "the editor once, then sync again."
+)
+
 SERVER_INSTRUCTIONS = (
     "GodotLens exposes Godot's own language server, so answers reflect how Godot "
     "compiles the project rather than a text search.\n"
     "- All line and character parameters are ZERO-BASED (editor line 1 = line 0).\n"
     "- Godot's LSP does not watch the filesystem. After editing a .gd file, call "
     "gdscript_sync_file or gdscript_sync_files before relying on any other result.\n"
-    "- Godot must be running with the project open. Check gdscript_status first.\n"
+    "- gdscript_* and debug_* need the Godot editor open on the project; check "
+    "gdscript_status first. scene_*, project_* and runtime_* run the engine themselves.\n"
     "- Godot's reference search reads .gd files only; it cannot see method names "
     "referenced from .tscn scene files, so renaming a signal handler may leave a "
-    "scene connection pointing at the old name."
+    "scene connection pointing at the old name.\n"
+    "- To see what the game actually does, use runtime_run (headless; one game per "
+    "agent, no editor needed), then runtime_tree, runtime_inspect, runtime_output, "
+    "runtime_eval and runtime_input; runtime_reload applies script fixes while it runs. "
+    "Use windowed=true only for runtime_screenshot. Stop games with runtime_stop.\n"
+    "- Tool calls run concurrently, but two agents writing the same file overwrite each "
+    "other: one writer at a time."
 )
 
 
@@ -134,9 +167,13 @@ def jsonrpc_error(req_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
-def tool_result(content_text: str, is_error: bool = False) -> dict:
+def tool_result(content_text: str, is_error: bool = False,
+                images: list[tuple[str, str]] | None = None) -> dict:
+    """A tools/call result: the JSON text first, then any images as (base64, mime type)."""
+    content = [{"type": "text", "text": content_text}]
+    content += [{"type": "image", "data": data, "mimeType": mime} for data, mime in images or []]
     return {
-        "content": [{"type": "text", "text": content_text}],
+        "content": content,
         "isError": is_error,
     }
 
@@ -571,14 +608,19 @@ TOOLS = [
     {
         "name": "scene_validate",
         "description": (
-            "Check that a scene's signal connections still point at methods that exist. "
-            "Returns: per-scene problems - missing handler methods, targets with no "
-            "script, and connections aimed at nodes that are not in the scene. "
-            "WHEN TO CALL: after editing a .tscn, or after renaming or removing a "
-            "signal handler in GDScript. "
-            "Connections are stored as unvalidated STRINGS, so a stale one produces no "
-            "compile error and fails only when the signal fires at runtime. "
-            "Handler existence is checked against the LSP's parse of the attached script."
+            "Check a scene for what Godot gets silently wrong when it loads or runs it. "
+            "Errors: connections to handlers or nodes that do not exist, signals the "
+            "source does not have, handlers taking the wrong number of arguments, unknown "
+            "node types, scripts whose base type does not fit the node, missing parents, "
+            "duplicate names and duplicate unique names, and changes to nodes that do not "
+            "exist in an instanced scene. Warnings: unknown properties, values of the "
+            "wrong type, and NodePaths to nodes not in the scene. "
+            "Returns: per-scene problems with kind, severity and detail; valid means no "
+            "errors. "
+            "WHEN TO CALL: after editing a .tscn, or after renaming or removing a signal "
+            "handler in GDScript. Godot accepts all of these with no error or only a "
+            "console warning. Facts come from the engine; handler existence from the LSP's "
+            "parse of the attached script."
         ),
         "inputSchema": {
             "type": "object",
@@ -610,12 +652,15 @@ TOOLS = [
     {
         "name": "debug_output",
         "description": (
-            "Read console output the running game produced - print() calls, stdout, stderr, "
-            "and runtime script errors with their source location. "
-            "Returns: captured lines with category and originating file/line. "
+            "Read what a game started with debug_run produced: print() output and "
+            "stdout/stderr lines, plus structured errors - push_error, push_warning, "
+            "engine errors and runtime script errors - each with file, function, "
+            "ZERO-BASED line and call stack. "
+            "Returns: lines, errors, and their counts. "
             "THIS IS THE ONLY WAY to see what the game actually did; the language server "
             "reports whether code compiles, not what it printed. "
-            "Output is drained on each call, so successive calls return only what is new."
+            "Output and errors are drained on each call, so successive calls return only "
+            "what is new."
         ),
         "inputSchema": {
             "type": "object",
@@ -809,13 +854,31 @@ TOOLS = [
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
+        "name": "project_validate",
+        "description": (
+            "Find references that no longer resolve, project-wide: scene and resource "
+            "dependencies pointing at moved or deleted files, missing autoload scripts, and "
+            "a missing main scene. "
+            "Returns: broken references with the file that holds each, plus stale UIDs "
+            "(Godot falls back to the text path and warns). "
+            "WHEN TO CALL: after moving, renaming or deleting files. Nothing else reports "
+            "these until the reference is loaded at runtime. Uses the engine's own "
+            "resolution: a reference whose UID still resolves is not broken. Script "
+            "preload()/extends paths are compile errors - gdscript_diagnostics reports "
+            "them. Requires a Godot binary; runs no project code."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
         "name": "debug_run",
         "description": (
-            "Run the project and collect what it prints. "
-            "Returns: captured stdout/stderr, whether the game exited, and any stop reason. "
+            "Run the project from the open Godot editor and collect what it prints. "
+            "Returns: captured output, structured errors with call stacks, whether the game "
+            "exited, and any stop reason. "
             "THIS CLOSES THE LOOP: edit, sync, run, and read the actual behaviour, without "
             "the developer pressing F5 or pasting console output back. "
-            "The game runs in the Godot editor that is already open. "
+            "The editor has ONE run slot: a second debug_run stops the first game. "
             "Set breakpoints with debug_set_breakpoints BEFORE calling this if you want "
             "execution to pause. Long-running games keep going - use debug_output to keep "
             "reading and debug_terminate to stop."
@@ -836,6 +899,13 @@ TOOLS = [
                     "type": "number",
                     "description": "Seconds to wait for the game to start (default 60)",
                 },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": ("Extra engine flags appended to the game's command line, "
+                                    "e.g. [\"--headless\"] to run with no window, "
+                                    "[\"--fixed-fps\", \"60\"], [\"--debug-collisions\"]"),
+                },
             },
             "required": [],
         },
@@ -844,6 +914,8 @@ TOOLS = [
             "idempotentHint": False, "openWorldHint": False,
         },
     },
+    # Runtime: games GodotLens launches itself (runtime/tools.py).
+    *runtime_tools.TOOLS,
 ]
 
 
@@ -961,6 +1033,70 @@ def _native_name(entry: Any) -> str:
     return str(entry)
 
 
+# Deeper than any engine class hierarchy; it only stops a malformed list looping.
+MAX_INHERITANCE_DEPTH = 32
+
+
+def _ancestors(class_name: str, natives: list) -> list[str]:
+    """The engine inheritance chain above ``class_name``, nearest first.
+
+    Taken from the ``inherits`` field of the class list Godot pushes on connect, so
+    the chain is the exact build's, not a remembered one.
+    """
+    parents = {_native_name(c): c.get("inherits", "") for c in natives if isinstance(c, dict)}
+    chain: list[str] = []
+    current = parents.get(class_name, "")
+    while (current and current != class_name and current not in chain
+           and len(chain) < MAX_INHERITANCE_DEPTH):
+        chain.append(current)
+        current = parents.get(current, "")
+    return chain
+
+
+async def _evaluate_refusal(frame_id: int | None) -> tuple[dict | None, int | None]:
+    """Decide whether debug_evaluate may be sent; returns (refusal, frame to use).
+
+    Godot answers an evaluate only while stopped in its debug loop, and only against
+    the script instance of the requested frame. Otherwise the request is never
+    answered, or - worse - the game-side handler breaks out of the debug loop and the
+    game RESUMES (``RemoteDebugger::debug``). That happens at a parse-error break and
+    in a static function. A frame has an instance exactly when Godot lists ``self``
+    among its members, which is the check used here.
+    """
+    hint = ("Set a breakpoint with debug_set_breakpoints and run, or evaluate in a game "
+            "GodotLens launched with runtime_eval (requires the GodotLens helper).")
+    if not _dap.stopped_state:
+        return {"error": "Execution is not paused, so Godot will not evaluate anything.",
+                "kind": "not_paused", "hint": hint}, None
+
+    frames = await _dap.stack_trace(int(_dap.stopped_state.get("thread_id") or 1))
+    if not frames:
+        return {"error": "Execution is stopped outside script code; there is no frame to "
+                         "evaluate in.", "kind": "not_paused", "hint": hint}, None
+    ids = [frame["id"] for frame in frames]
+    if frame_id is None:
+        frame_id = ids[0]
+    elif frame_id not in ids:
+        return {"error": f"Frame {frame_id} is not on the current stack.",
+                "kind": "unknown_frame", "frames": ids}, None
+
+    has_self = False
+    for scope in await _dap.scopes(frame_id):
+        if scope.get("name") == "Members" and scope.get("variables_reference"):
+            members = await _dap.variables(scope["variables_reference"])
+            has_self = any(var.get("name") == "self" for var in members)
+    if not has_self:
+        return {
+            "error": "This frame has no script instance to evaluate against.",
+            "kind": "no_script_instance",
+            "detail": ("It is a static function or a parse-error break. Godot would "
+                       "resume the game instead of answering. Pick another frame from "
+                       "debug_stack_trace, or break inside an instance method."),
+            "frames": ids,
+        }, None
+    return None, frame_id
+
+
 def _compact_completions(items: Any, limit: int) -> dict:
     """Strip completion items down to what an agent can act on.
 
@@ -1049,6 +1185,135 @@ async def read_text_file(path: str) -> str:
     return await asyncio.get_event_loop().run_in_executor(None, _read)
 
 
+def _undeclared_names(file_paths: list[str]) -> dict[str, list[str]]:
+    """Names the analyzer could not resolve, mapped to the files reporting them."""
+    found: dict[str, list[str]] = {}
+    for file_path in file_paths:
+        for diagnostic in _lsp.diagnostics_cache.get(canonical_key(file_path), []):
+            match = _UNDECLARED.search(diagnostic.get("message", ""))
+            if match and file_path not in found.setdefault(match.group(1), []):
+                found[match.group(1)].append(file_path)
+    return found
+
+
+async def _project_class_declarations(names: set[str]) -> dict[str, str]:
+    """Which of ``names`` a project script declares with class_name -> its res:// path."""
+    root = find_project_root()
+    scripts = await _list_project_scripts(root)
+    declared: dict[str, str] = {}
+    for name in names:
+        for path in await _files_mentioning(name, scripts):
+            try:
+                text = await read_text_file(path)
+            except (OSError, UnicodeDecodeError):
+                continue
+            if name in _CLASS_NAME.findall(text):
+                declared[name] = to_res_path(path, root)
+                break
+    return declared
+
+
+# Created and removed at once in a folder the editor has missed a new file in. The
+# editor's scan skips names starting with "." (EditorFileSystem), so it is never
+# registered; its only effect is the folder's modification time.
+RESCAN_MARKER = ".godotlens-rescan"
+
+
+def _nudge_folder(folder: str) -> None:
+    """Make the editor's next change scan re-read ``folder``.
+
+    A change scan re-reads only folders whose modification time differs from the one
+    it recorded, and Godot keeps those times in whole seconds (file_access_windows.cpp).
+    A file created in the same second as a scan already recorded is therefore invisible
+    until the folder changes again in a later second.
+    """
+    marker = os.path.join(folder, RESCAN_MARKER)
+    try:
+        with open(marker, "w", encoding="utf-8"):
+            pass
+        os.remove(marker)
+    except OSError:
+        pass  # a folder we cannot write to; the hint still explains what to do
+
+
+async def _await_new_classes(contents: dict[str, str]) -> tuple[dict, set[str]]:
+    """Give the editor time to register class_name files it has never seen.
+
+    ``contents`` maps each just-synced file to the text it was synced with. If their
+    diagnostics name a class that a project file declares, the editor simply has not
+    registered that file yet: the language server never learns about a new class from
+    a sync, only from the editor's filesystem scan. The dependants are re-checked for
+    up to NEW_CLASS_WAIT seconds. A name no project file declares is a real typo and
+    is left to the diagnostics.
+
+    Returns extra result fields, and the files whose re-check Godot never answered.
+    """
+    undeclared = _undeclared_names(list(contents))
+    if not undeclared:
+        return {}, set()
+    declared = await _project_class_declarations(set(undeclared))
+    pending = dict(declared)
+    if not pending:
+        return {}, set()
+
+    affected = sorted({fp for name in pending for fp in undeclared[name]})
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    deadline = started + NEW_CLASS_WAIT
+    missing: set[str] = set()
+    nudged = False
+    while pending and loop.time() < deadline:
+        await asyncio.sleep(0.5)
+        if not nudged and loop.time() - started >= 1.0:
+            # Still unknown a second after the file was written: the editor's scan may have
+            # recorded the folder in the same second, so make the folder change again.
+            nudged = True
+            root = find_project_root()
+            for folder in sorted({os.path.dirname(_res_to_disk(path, root)) for path in pending.values()}):
+                await asyncio.to_thread(_nudge_folder, folder)
+        for file_path in affected:
+            _lsp.diagnostics_cache.pop(canonical_key(file_path), None)
+            await _lsp.sync_document(file_uri(file_path), contents[file_path], notify_save=False)
+        missing = await _lsp.wait_for_diagnostics([canonical_key(fp) for fp in affected],
+                                                  timeout=DIAGNOSTICS_TIMEOUT)
+        still = _undeclared_names(affected)
+        pending = {name: path for name, path in pending.items() if name in still}
+
+    unverified = {fp for fp in affected if canonical_key(fp) in missing}
+    if not pending:
+        return {"new_classes_registered": sorted(declared)}, unverified
+    return {"unregistered_classes": pending, "hint": UNREGISTERED_CLASS_HINT}, unverified
+
+
+async def _check_scripts(files: list[str]) -> dict | None:
+    """Errors the language server reports in these scripts, read from disk.
+
+    Returns {file: [error, ...]} for files with errors ({} when all are clean), or None
+    when no editor is connected to ask. Used before hot-reloading into a running game,
+    where a script that fails to compile is disabled.
+    """
+    ok, _ = await ensure_connected()
+    if not ok:
+        return None
+    async with _lsp.document_lock:
+        keys = {}
+        for file_path in files:
+            disk_path = _res_to_disk(file_path, find_project_root())
+            key = canonical_key(disk_path)
+            _lsp.diagnostics_cache.pop(key, None)
+            await _lsp.sync_document(file_uri(disk_path), await read_text_file(disk_path),
+                                     notify_save=False)
+            keys[file_path] = key
+        await _lsp.wait_for_diagnostics(list(keys.values()), timeout=DIAGNOSTICS_TIMEOUT)
+    problems = {}
+    for file_path, key in keys.items():
+        errors = [d for d in _compact_diagnostics(_lsp.diagnostics_cache.get(key, []))
+                  if d["severity"] == 1]
+        if errors:
+            problems[file_path] = errors
+    return problems
+
+
 def _compact_diagnostics(diagnostics: list) -> list:
     """Reduce LSP diagnostics to line/severity/message."""
     return [{
@@ -1071,13 +1336,30 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
     if name == "gdscript_status":
         ok, msg = await _lsp.connect()
         status = "connected" if ok else "disconnected"
-        return tool_result(json.dumps({"status": status, "message": msg, "host": _lsp.host, "port": _lsp.port}))
+        return tool_result(json.dumps({
+            "status": status, "message": msg, "host": _lsp.host, "port": _lsp.port,
+            # Agents that share one GodotLens see the same pid; separate servers differ.
+            "server_pid": os.getpid(),
+        }))
 
-    # All other tools require connection
-    ok, msg = await ensure_connected()
-    if not ok:
-        return tool_result(json.dumps({"error": msg, "status": "disconnected"}), is_error=True)
+    # Only the language-server tools need the language server. scene_*, project_config
+    # and debug_* reach Godot by other routes and used to be refused for no reason
+    # whenever the editor's LSP was down.
+    if name.startswith("gdscript_"):
+        ok, msg = await ensure_connected()
+        if not ok:
+            return tool_result(json.dumps({"error": msg, "status": "disconnected"}), is_error=True)
+        # Tool calls run concurrently. Godot's language server answers one request at a
+        # time anyway, and some of these tools briefly put temporary content into a
+        # document (validate's draft, a re-sync), so they run one after another and a
+        # concurrent query can never observe it.
+        async with _lsp.document_lock:
+            return await _dispatch_tool(name, arguments)
+    return await _dispatch_tool(name, arguments)
 
+
+async def _dispatch_tool(name: str, arguments: dict) -> dict:
+    """Run one tool and turn every failure into a result the agent can act on."""
     try:
         result = None
 
@@ -1171,10 +1453,23 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             class_name = arguments["class_name"]
             member = arguments.get("member")
             if member:
-                result = await _lsp.request("textDocument/nativeSymbol", {
-                    "native_class": class_name, "symbol_name": member})
+                # nativeSymbol searches only the named class's own members
+                # (GDScriptWorkspace::resolve_native_symbol), so add_child on a
+                # CharacterBody2D came back "not found". Walk the ancestors on a miss.
+                chain = [class_name, *_ancestors(
+                    class_name, _lsp.native_capabilities.get("native_classes") or [])]
+                result = None
+                for owner in chain:
+                    result = await _lsp.request("textDocument/nativeSymbol", {
+                        "native_class": owner, "symbol_name": member})
+                    if result is not None:
+                        if isinstance(result, dict):
+                            result["declared_in"] = owner
+                            result["inheritance"] = chain
+                        break
                 if result is None:
-                    result = {"found": False, "class_name": class_name, "member": member}
+                    result = {"found": False, "class_name": class_name, "member": member,
+                              "searched": chain}
             else:
                 # An empty symbol_name returns the class AND every child, which for
                 # Node or Control is enormous. Serve the index from the capabilities
@@ -1237,6 +1532,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                     "connected": True,
                     "host": _dap.host,
                     "port": _dap.port,
+                    "server_pid": os.getpid(),
                     "capabilities": _dap.capabilities,
                     "stopped": _dap.stopped_state,
                     "terminated": _dap.terminated,
@@ -1246,12 +1542,16 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             elif name == "debug_output":
                 # Collect whatever the game has emitted since the last call.
                 await _dap.drain_events(float(arguments.get("wait", 1.0)))
-                lines = _dap.take_output(clear=bool(arguments.get("clear", True)))
+                clear = bool(arguments.get("clear", True))
+                lines = _dap.take_output(clear=clear)
+                errors = _dap.take_errors(clear=clear)
                 result = {
                     "lines": lines,
                     "count": len(lines),
+                    "errors": errors,
+                    "error_count": len(errors),
                     "note": ("Empty means nothing was printed since the last call. Output "
-                             "only arrives while a game is running under the debugger."),
+                             "only arrives while a game started with debug_run is running."),
                 }
 
             elif name == "debug_set_breakpoints":
@@ -1287,9 +1587,11 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 result = {"frame_id": frame_id, "scopes": contents}
 
             elif name == "debug_evaluate":
-                result = await _dap.evaluate(
-                    arguments["expression"],
+                refusal, frame_id = await _evaluate_refusal(
                     int(arguments["frame_id"]) if arguments.get("frame_id") is not None else None)
+                if refusal is not None:
+                    return tool_result(json.dumps(refusal), is_error=True)
+                result = await _dap.evaluate(arguments["expression"], frame_id)
 
             elif name == "debug_continue":
                 await _dap.continue_execution(int(arguments.get("thread_id", 1)))
@@ -1310,13 +1612,16 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 body = await _dap.launch(
                     root,
                     scene=arguments.get("scene"),
-                    timeout=float(arguments.get("timeout", 60.0)))
+                    timeout=float(arguments.get("timeout", 60.0)),
+                    play_args=[str(a) for a in arguments.get("args") or []])
                 lines = await _dap.collect_output(float(arguments.get("collect", 10.0)))
+                errors = _dap.take_errors()
                 result = {
                     "launched": True,
                     "project": root,
                     "output": lines,
                     "output_lines": len(lines),
+                    "errors": errors,
                     "exited": _dap.terminated,
                     "stopped": _dap.stopped_state,
                     "events": [e["event"] for e in _dap.events],
@@ -1334,6 +1639,15 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
 
             else:
                 return tool_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
+
+        # Runtime: games GodotLens launched, over their own debugger connection.
+        elif name.startswith("runtime_"):
+            if name not in runtime_tools.TOOL_NAMES:
+                return tool_result(json.dumps({"error": f"Unknown tool: {name}"}), is_error=True)
+            result, images = await runtime_tools.call(
+                name, arguments, find_project_root(), _check_scripts)
+            if images:
+                return tool_result(json.dumps(result), images=images)
 
         elif name == "gdscript_find":
             wanted = arguments["name"]
@@ -1395,6 +1709,12 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             root = find_project_root()
             result = await dump_project(root)
 
+        elif name == "project_validate":
+            report = await validate_project(find_project_root())
+            report["valid"] = not (report["broken"] or report["missing_autoloads"]
+                                   or not report["main_scene"]["exists"])
+            result = report
+
         elif name == "scene_state":
             root = find_project_root()
             dump = await dump_scenes(arguments["files"], root)
@@ -1403,23 +1723,29 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
         elif name == "scene_validate":
             root = find_project_root()
             dump = await dump_scenes(arguments["files"], root)
+            # Handler existence comes from the LSP's parse. Without an editor the other
+            # checks still run; the handler check is reported as skipped, never passed.
+            lsp_ok, _ = await ensure_connected()
             report = {}
             for res_path, scene in (dump.get("scenes") or {}).items():
                 # Ask the LSP which functions each attached script really has, so the
                 # check is against Godot's parse rather than our own reading.
                 symbols: dict[str, set[str]] = {}
-                for script_res in collect_scripts(scene):
-                    disk_path = _res_to_disk(script_res, root)
-                    if not await _exists(disk_path):
-                        continue
-                    try:
-                        tree = await _lsp.request("textDocument/documentSymbol", {
-                            "textDocument": {"uri": file_uri(disk_path)}})
-                        symbols[script_res] = _symbol_names(tree)
-                    except LSPError:
-                        continue
+                async with _lsp.document_lock:
+                    for script_res in collect_scripts(scene) if lsp_ok else []:
+                        disk_path = _res_to_disk(script_res, root)
+                        if not await _exists(disk_path):
+                            continue
+                        try:
+                            tree = await _lsp.request("textDocument/documentSymbol", {
+                                "textDocument": {"uri": file_uri(disk_path)}})
+                            symbols[script_res] = _symbol_names(tree)
+                        except LSPError:
+                            continue
                 report[res_path] = validate_scene(scene, symbols)
             result = {"scenes": report, "errors": dump.get("errors") or {}}
+            if not lsp_ok:
+                result["handler_check"] = "skipped: language server not connected"
 
         elif name == "gdscript_validate":
             # Check proposed content WITHOUT writing it to disk, so a broken edit is
@@ -1427,8 +1753,9 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             file_path = arguments["file"]
             uri = file_uri(file_path)
             key = canonical_key(file_path)
+            was_open = _lsp.is_open(uri)
             original = None
-            if _lsp.is_open(uri):
+            if was_open:
                 try:
                     original = await read_text_file(file_path)
                 except OSError:
@@ -1440,9 +1767,13 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             diagnostics = _compact_diagnostics(_lsp.diagnostics_cache.get(key, []))
 
             # Put the LSP back on the real file so a rejected draft is not left behind.
+            # A file this session had not opened is released instead: leaving the draft
+            # open made every later query on it answer from code that was never written.
+            _lsp.diagnostics_cache.pop(key, None)
             if original is not None:
-                _lsp.diagnostics_cache.pop(key, None)
                 await _lsp.sync_document(uri, original, notify_save=False)
+            else:
+                await _lsp.close_document(uri)
 
             result = {
                 "file": file_path,
@@ -1468,6 +1799,8 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
             # reading a stale one and calling it verified.
             _lsp.diagnostics_cache.pop(key, None)
             missing = await _lsp.wait_for_diagnostics([key], timeout=DIAGNOSTICS_TIMEOUT)
+            new_classes, recheck_missing = await _await_new_classes({file_path: content})
+            missing = set(missing) | {canonical_key(fp) for fp in recheck_missing}
 
             result = {
                 "synced": file_path,
@@ -1477,6 +1810,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 # reported back". Reporting the second as clean is how broken code
                 # used to get a passing verdict.
                 "verified": not missing,
+                **new_classes,
             }
             if missing:
                 result["warning"] = (
@@ -1486,6 +1820,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
 
         elif name == "gdscript_sync_files":
             synced_uris = []
+            contents: dict[str, str] = {}
             errors = []
             for file_path in arguments["files"]:
                 try:
@@ -1494,11 +1829,14 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                     _lsp.diagnostics_cache.pop(canonical_key(file_path), None)
                     await _lsp.sync_document(uri, content)
                     synced_uris.append((file_path, uri))
+                    contents[file_path] = content
                 except (OSError, UnsupportedPathError) as e:
                     errors.append({"file": file_path, "error": str(e)})
 
             keys = [canonical_key(fp) for fp, _ in synced_uris]
             missing = await _lsp.wait_for_diagnostics(keys, timeout=DIAGNOSTICS_TIMEOUT)
+            new_classes, recheck_missing = await _await_new_classes(contents)
+            missing = set(missing) | {canonical_key(fp) for fp in recheck_missing}
 
             results = {}
             for file_path, _uri in synced_uris:
@@ -1509,6 +1847,7 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 "synced": len(synced_uris),
                 "diagnostics": results,
                 "verified": not missing,
+                **new_classes,
             }
             if missing:
                 result["unverified_files"] = [
@@ -1530,7 +1869,8 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
                 # no-op. didClose is the only portable effect available.
                 "note": ("Released the document from the LSP. Godot has no working "
                          "file-deletion notification on 4.6+, so stale project-wide "
-                         "state clears when the editor rescans."),
+                         "state clears when the editor rescans. After deleting or moving "
+                         "a file, project_validate finds scenes still pointing at it."),
             }
 
         # Batch operations
@@ -1623,6 +1963,12 @@ async def handle_tool_call(name: str, arguments: dict) -> dict:
     except DAPError as e:
         return tool_result(json.dumps({"error": str(e), "kind": "dap_error"}), is_error=True)
 
+    except SessionError as e:
+        payload = {"error": str(e), "kind": e.kind}
+        if e.detail:
+            payload["detail"] = e.detail
+        return tool_result(json.dumps(payload), is_error=True)
+
     except GodotBinaryNotFound as e:
         return tool_result(json.dumps({"error": str(e), "kind": "godot_binary_missing"}), is_error=True)
 
@@ -1714,13 +2060,36 @@ async def handle_request(msg: dict) -> dict | None:
 # Main loop
 # ---------------------------------------------------------------------------
 
+# How long in-flight tool calls may finish after the client closes stdin.
+SHUTDOWN_GRACE = 10.0
+
+
+async def respond(msg: dict) -> None:
+    """Handle one request and write its response, containing any failure."""
+    try:
+        response = await handle_request(msg)
+    except Exception as exc:
+        log(f"unhandled error in {msg.get('method', '?')}: {exc!r}")
+        response = jsonrpc_error(msg.get("id"), -32603, f"Internal error: {exc}")
+    if response is not None:
+        write_message(response)
+
+
+def lsp_client_from_env() -> LSPClient:
+    """The language-server client as GODOT_LSP_HOST/PORT/TIMEOUT configure it."""
+    return LSPClient(
+        host=os.environ.get("GODOT_LSP_HOST", "127.0.0.1"),
+        port=int(os.environ.get("GODOT_LSP_PORT", "6005")),
+        timeout=float(os.environ.get("GODOT_LSP_TIMEOUT", str(DEFAULT_TIMEOUT))),
+    )
+
+
 async def main():
     """Run the MCP server over stdio."""
     global _lsp, _dap
 
-    host = os.environ.get("GODOT_LSP_HOST", "127.0.0.1")
-    port = int(os.environ.get("GODOT_LSP_PORT", "6005"))
-    _lsp = LSPClient(host=host, port=port)
+    _lsp = lsp_client_from_env()
+    in_flight: set[asyncio.Task] = set()
 
     try:
         while True:
@@ -1730,14 +2099,22 @@ async def main():
             if isinstance(msg, ParseFailure):
                 write_message(jsonrpc_error(None, msg.code, msg.message))
                 continue  # a bad line must not end the session
-            try:
-                response = await handle_request(msg)
-            except Exception as exc:
-                log(f"unhandled error in {msg.get('method', '?')}: {exc!r}")
-                response = jsonrpc_error(msg.get("id"), -32603, f"Internal error: {exc}")
-            if response is not None:
-                write_message(response)
+            if msg.get("method") == "tools/call" and msg.get("id") is not None:
+                # Tool calls run concurrently: agents sharing this server must not wait
+                # behind one another's debug_run or scene dump. Everything else, and
+                # initialize in particular, is answered in order.
+                task = asyncio.get_event_loop().create_task(respond(msg))
+                in_flight.add(task)
+                task.add_done_callback(in_flight.discard)
+            else:
+                await respond(msg)
+        # The client closed stdin; answer what it already asked before shutting down.
+        if in_flight:
+            await asyncio.wait(in_flight, timeout=SHUTDOWN_GRACE)
     finally:
+        for task in in_flight:
+            task.cancel()
+        await runtime_tools.stop_all()  # games GodotLens launched end with it
         await _lsp.disconnect()
         _lsp = None
         if _dap is not None:

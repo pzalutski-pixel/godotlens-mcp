@@ -216,6 +216,17 @@ def test_canonical_key_is_stable_across_spellings(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_lsp_timeout_is_read_from_the_environment(monkeypatch):
+    """GODOT_LSP_TIMEOUT was documented and advertised but never read."""
+    from godotlens_mcp.server import lsp_client_from_env
+
+    monkeypatch.setenv("GODOT_LSP_TIMEOUT", "42.5")
+    monkeypatch.setenv("GODOT_LSP_PORT", "6008")
+    client = lsp_client_from_env()
+    assert client.timeout == 42.5
+    assert client.port == 6008
+
+
 def test_client_defaults():
     client = LSPClient()
     assert client.port == 6005

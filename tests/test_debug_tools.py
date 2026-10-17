@@ -70,14 +70,13 @@ def test_debug_output_is_empty_but_explains_why(debug_proc):
 
 
 def test_debug_evaluate_without_a_session_fails_cleanly(debug_proc):
-    """Evaluating with nothing paused is a legitimate error, not a crash."""
+    """Evaluating with nothing paused is refused up front, not sent and left hanging."""
     proc, _ = debug_proc
     payload, is_error = proc.call_tool("debug_evaluate", {"expression": "1 + 1"})
 
-    if is_error:
-        assert payload["kind"] in {"dap_error", "dap_connection_lost"}
-    else:
-        assert "result" in payload
+    assert is_error
+    assert payload["kind"] == "not_paused"
+    assert "hint" in payload
 
     # The session must remain usable either way.
     status, status_error = proc.call_tool("debug_status", {})
@@ -193,8 +192,9 @@ def test_debug_tools_are_annotated_correctly():
 # The fixture project's main scene is main.tscn, which prints nothing and never
 # quits. runtime_main.tscn prints identifiable output and exits, so the test
 # terminates on its own. Passing it explicitly also covers the scene parameter,
-# which Godot accepts as a res:// path.
-RUN_ARGS = {"scene": "res://runtime_main.tscn", "collect": 20, "timeout": 90}
+# which Godot accepts as a res:// path. --headless keeps the game windowless.
+HEADLESS = ["--headless"]
+RUN_ARGS = {"scene": "res://runtime_main.tscn", "collect": 20, "timeout": 90, "args": HEADLESS}
 
 
 def test_debug_run_captures_the_games_output(debug_proc):
@@ -243,3 +243,135 @@ def test_debug_run_then_output_is_drained(debug_proc):
     second, is_error = proc.call_tool("debug_output", {"wait": 1.0})
     assert not is_error, second
     assert second["count"] == 0, "output was returned twice"
+
+
+# ---------------------------------------------------------------------------
+# Structured errors
+# ---------------------------------------------------------------------------
+
+
+def _finish(proc):
+    """Stop whatever is running so the editor's single run slot is free again."""
+    proc.call_tool("debug_terminate", {})
+    proc.call_tool("debug_output", {"wait": 1.0})
+
+
+def test_push_error_is_reported_with_its_script_location(debug_proc):
+    """push_error never reaches DAP output; only the structured error message has it."""
+    proc, _ = debug_proc
+    payload, is_error = proc.call_tool("debug_run", {
+        "scene": "res://errors_main.tscn", "collect": 15, "timeout": 90, "args": HEADLESS})
+    try:
+        assert not is_error, payload
+        by_message = {e["message"]: e for e in payload["errors"]}
+        pushed = by_message.get("GODOTLENS_TEST: pushed an error")
+        assert pushed, f"push_error not reported: {payload['errors']}"
+        assert pushed["file"] == "res://errors_probe.gd"
+        assert pushed["function"] == "_ready"
+        assert pushed["warning"] is False
+        assert by_message["GODOTLENS_TEST: pushed a warning"]["warning"] is True
+    finally:
+        _finish(proc)
+
+
+def test_a_runtime_error_comes_with_its_call_stack(debug_proc):
+    proc, _ = debug_proc
+    payload, is_error = proc.call_tool("debug_run", {
+        "scene": "res://crash_main.tscn", "collect": 6, "timeout": 90, "args": HEADLESS})
+    try:
+        assert not is_error, payload
+        crash = [e for e in payload["errors"] if "queue_free" in e["message"]]
+        assert crash, f"the null call was not reported: {payload['errors']}"
+        assert crash[0]["file"] == "res://crash_probe.gd"
+        assert crash[0]["stack"], "a runtime error must carry its stack"
+    finally:
+        _finish(proc)
+
+
+# ---------------------------------------------------------------------------
+# A game that prints every frame
+# ---------------------------------------------------------------------------
+
+
+def test_debug_output_returns_promptly_while_the_game_prints_every_frame(debug_proc):
+    """Regression: waiting for the stream to go quiet never returned."""
+    import time
+
+    proc, _ = debug_proc
+    payload, is_error = proc.call_tool("debug_run", {
+        "scene": "res://chatty_main.tscn", "collect": 1, "timeout": 90, "args": HEADLESS})
+    try:
+        assert not is_error, payload
+        started = time.time()
+        output, is_error = proc.call_tool("debug_output", {"wait": 3})
+        assert not is_error, output
+        assert time.time() - started < 8, "debug_output did not honour its wait"
+        assert output["count"] > 0
+    finally:
+        _finish(proc)
+
+
+def test_the_editor_stays_responsive_while_a_chatty_game_runs(debug_proc):
+    """Regression: nobody read the debug socket between calls; once it filled,
+    Godot's adapter spun on the editor's main thread and froze it, language server
+    included. Measured on 4.7.1: frozen within 10 s with the socket unread.
+    """
+    import time
+
+    proc, _ = debug_proc
+    payload, is_error = proc.call_tool("debug_run", {
+        "scene": "res://chatty_long_main.tscn", "collect": 1, "timeout": 90, "args": HEADLESS})
+    try:
+        assert not is_error, payload
+        time.sleep(30)  # GodotLens idle: no call reads the socket
+        started = time.time()
+        symbols, is_error = proc.call_tool("gdscript_symbols", {"file": "player.gd"})
+        assert not is_error, symbols
+        assert time.time() - started < 5, "the editor was frozen"
+    finally:
+        _finish(proc)
+
+
+# ---------------------------------------------------------------------------
+# debug_evaluate at real breakpoints
+# ---------------------------------------------------------------------------
+
+
+def _break_on(proc, project, marker):
+    lines = (project / "guard_probe.gd").read_text(encoding="utf-8").split("\n")
+    line = next(i for i, text in enumerate(lines) if marker in text)
+    payload, is_error = proc.call_tool(
+        "debug_set_breakpoints", {"file": "guard_probe.gd", "lines": [line]})
+    assert not is_error, payload
+    run, is_error = proc.call_tool("debug_run", {
+        "scene": "res://guard_main.tscn", "collect": 6, "timeout": 90, "args": HEADLESS})
+    assert not is_error, run
+    assert run["stopped"], f"did not stop at the breakpoint: {run}"
+
+
+def test_evaluate_in_a_static_function_is_refused_and_the_game_stays_paused(debug_proc):
+    """Godot would break out of its debug loop and resume the game instead of answering."""
+    proc, project = debug_proc
+    try:
+        _break_on(proc, project, "BREAK_STATIC")
+        payload, is_error = proc.call_tool("debug_evaluate", {"expression": "x * 3"})
+        assert is_error
+        assert payload["kind"] == "no_script_instance"
+
+        stack, _ = proc.call_tool("debug_stack_trace", {})
+        assert stack["frames"], "the game resumed"
+    finally:
+        proc.call_tool("debug_set_breakpoints", {"file": "guard_probe.gd", "lines": []})
+        _finish(proc)
+
+
+def test_evaluate_in_an_instance_method_answers(debug_proc):
+    proc, project = debug_proc
+    try:
+        _break_on(proc, project, "BREAK_INSTANCE")
+        payload, is_error = proc.call_tool("debug_evaluate", {"expression": "hp + total"})
+        assert not is_error, payload
+        assert str(payload["result"]) == "142"
+    finally:
+        proc.call_tool("debug_set_breakpoints", {"file": "guard_probe.gd", "lines": []})
+        _finish(proc)

@@ -62,22 +62,37 @@ class LSPClient:
         # reparsing, so the first text stays cached and poisons every later query.
         # Re-syncing must use didChange, which means tracking what is open.
         self._open_docs: dict[str, int] = {}  # uri -> document version
-        # Serializes request/response pairs over the single shared socket.
-        self._lock = asyncio.Lock()
+        # Responses are matched to callers by id; a background task reads every frame
+        # for the life of the connection. Godot's language server writes from the
+        # editor's main thread with a loop that spins until the socket accepts every
+        # byte (LSPeer::send_data), so a client that only reads inside calls can
+        # freeze the editor once enough unsolicited traffic piles up.
+        self._pending: dict[int, asyncio.Future] = {}
+        self._reader_task: asyncio.Task | None = None
+        self._write_lock = asyncio.Lock()
+        self._inbound = asyncio.Event()       # set whenever a notification arrives
+        self._capabilities_pushed = asyncio.Event()
+        # Held across multi-step document sequences (sync, wait, restore) so that
+        # concurrent tool calls never observe another call's temporary content.
+        self.document_lock = asyncio.Lock()
 
     async def connect(self) -> tuple[bool, str]:
         """Connect to LSP. Returns (success, message)."""
         if self.writer and not self.writer.is_closing():
             return True, "Connected"
 
+        await self._stop_reader()  # a reader left over from a connection that died
         self.reader = None
         self.writer = None
         self.initialized = False
+        self._open_docs.clear()
+        self._capabilities_pushed.clear()
 
         try:
             self.reader, self.writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port), timeout=5.0
             )
+            self._ensure_reader()
             await self._initialize()
             self.last_error = None
             return True, "Connected to Godot LSP"
@@ -102,8 +117,19 @@ class LSPClient:
             await self._force_close()
             return False, f"LSP connection error: {e}"
 
+    async def _stop_reader(self) -> None:
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._reader_task = None
+        self._fail_pending(LSPConnectionLost("Disconnected from Godot LSP"))
+
     async def _force_close(self):
         """Drop the transport without awaiting a clean handshake."""
+        await self._stop_reader()
         if self.writer is not None:
             try:
                 self.writer.close()
@@ -116,6 +142,7 @@ class LSPClient:
 
     async def disconnect(self):
         """Disconnect from LSP server."""
+        await self._stop_reader()
         if self.writer:
             self.writer.close()
             try:
@@ -146,8 +173,55 @@ class LSPClient:
         await self.notify("initialized", {})
         # Godot pushes gdscript/capabilities (the full native class list) right after
         # initialized, plus changeWorkspace/showMessage if we named the wrong project.
-        await self.drain_notifications(window=1.0)
+        try:
+            await asyncio.wait_for(self._capabilities_pushed.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass  # an older or busy editor; the class list is an optimisation
         self.initialized = True
+
+    def _ensure_reader(self) -> None:
+        """Start the background reader if a stream is attached and none is running."""
+        if self.reader is not None and (self._reader_task is None or self._reader_task.done()):
+            self._reader_task = asyncio.get_event_loop().create_task(self._reader_loop())
+
+    async def _reader_loop(self) -> None:
+        """Read every frame for the life of the connection and route it."""
+        try:
+            while True:
+                try:
+                    data = await self._read_message(None)
+                except (LSPProtocolError, json.JSONDecodeError):
+                    continue  # the frame was consumed whole; the stream is still aligned
+                await self._dispatch(data)
+        except asyncio.CancelledError:
+            raise
+        except (LSPConnectionLost, asyncio.IncompleteReadError, ConnectionError, OSError,
+                ValueError) as exc:
+            self._fail_pending(LSPConnectionLost(f"LSP connection lost: {exc}"))
+            if self.writer is not None:
+                self.writer.close()
+
+    async def _dispatch(self, data: dict) -> None:
+        msg_id = data.get("id")
+        if msg_id is not None and "method" in data:
+            # A server-initiated *request*. It carries an id but is not our response;
+            # it was once mistaken for one, which returned None and left the real reply
+            # in the buffer, desyncing every later call.
+            await self._reject_server_request(msg_id, data["method"])
+            return
+        if msg_id is not None:
+            future = self._pending.pop(msg_id, None)
+            if future is not None and not future.done():
+                future.set_result(data)
+            return  # otherwise a stale response to a request we already gave up on
+        self._handle_inbound(data)
+        self._inbound.set()
+
+    def _fail_pending(self, exc: Exception) -> None:
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(exc)
+        self._pending.clear()
 
     async def _send(self, payload: dict) -> None:
         """Frame and write one JSON-RPC message."""
@@ -157,41 +231,54 @@ class LSPClient:
         # Length must count BYTES. json.dumps escapes non-ASCII by default so this is
         # currently always equal to len(str), but encoding first keeps it correct if
         # ensure_ascii is ever disabled.
-        self.writer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
-        await self.writer.drain()
+        async with self._write_lock:
+            self.writer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            await self.writer.drain()
 
     async def request(self, method: str, params: dict) -> Any:
         """Send a JSON-RPC request and return its result.
 
-        Serialized under a lock: one socket, and responses are matched by id, so
-        overlapping callers must not interleave their frames.
+        The response is matched by id, so overlapping callers may have requests in
+        flight together; writes are serialized so frames never interleave.
         """
-        async with self._lock:
-            self.request_id += 1
-            expect_id = self.request_id
-            try:
-                await self._send({
-                    "jsonrpc": "2.0",
-                    "id": expect_id,
-                    "method": method,
-                    "params": params,
-                })
-                return await self._read_response(expect_id)
-            except asyncio.TimeoutError as exc:
-                raise LSPTimeout(
-                    f"Godot LSP did not respond to {method} within {self.timeout}s. "
-                    "The editor may be busy reimporting, or the request may be unsupported."
-                ) from exc
-            except (asyncio.IncompleteReadError, ConnectionError, OSError) as exc:
-                raise LSPConnectionLost(f"LSP connection lost during {method}: {exc}") from exc
+        if self.writer is None:
+            raise LSPConnectionLost("Not connected to Godot LSP")
+        self.request_id += 1
+        expect_id = self.request_id
+        future = asyncio.get_event_loop().create_future()
+        self._pending[expect_id] = future
+        self._ensure_reader()
+        try:
+            await self._send({
+                "jsonrpc": "2.0",
+                "id": expect_id,
+                "method": method,
+                "params": params,
+            })
+            data = await asyncio.wait_for(future, self.timeout)
+        except asyncio.TimeoutError as exc:
+            raise LSPTimeout(
+                f"Godot LSP did not respond to {method} within {self.timeout}s. "
+                "The editor may be busy reimporting, or the request may be unsupported."
+            ) from exc
+        except (ConnectionError, OSError) as exc:
+            raise LSPConnectionLost(f"LSP connection lost during {method}: {exc}") from exc
+        finally:
+            self._pending.pop(expect_id, None)
+
+        if "error" in data:
+            raise LSPError(
+                data["error"].get("message", "LSP error"),
+                code=data["error"].get("code"),
+            )
+        return data.get("result")
 
     async def notify(self, method: str, params: dict):
         """Send a JSON-RPC notification (no response expected)."""
-        async with self._lock:
-            try:
-                await self._send({"jsonrpc": "2.0", "method": method, "params": params})
-            except (ConnectionError, OSError) as exc:
-                raise LSPConnectionLost(f"LSP connection lost sending {method}: {exc}") from exc
+        try:
+            await self._send({"jsonrpc": "2.0", "method": method, "params": params})
+        except (ConnectionError, OSError) as exc:
+            raise LSPConnectionLost(f"LSP connection lost sending {method}: {exc}") from exc
 
     async def _read_message(self, timeout: float | None) -> dict:
         """Read exactly one Content-Length framed message."""
@@ -229,32 +316,7 @@ class LSPClient:
             self.server_messages.append((data.get("params") or {}).get("message", ""))
         elif method == "gdscript/capabilities":
             self.native_capabilities = data.get("params") or {}
-
-    async def _read_response(self, expect_id: int) -> Any:
-        """Read until the response carrying ``expect_id`` arrives."""
-        while True:
-            data = await self._read_message(self.timeout)
-
-            msg_id = data.get("id")
-            if msg_id == expect_id:
-                if "error" in data:
-                    raise LSPError(
-                        data["error"].get("message", "LSP error"),
-                        code=data["error"].get("code"),
-                    )
-                return data.get("result")
-
-            if msg_id is not None and "method" in data:
-                # A server-initiated *request*. It carries an id but is not our
-                # response; previously it was mistaken for one, which returned None
-                # and left the real reply in the buffer, desyncing every later call.
-                await self._reject_server_request(msg_id, data["method"])
-                continue
-
-            if msg_id is not None:
-                continue  # stale response to a request we already gave up on
-
-            self._handle_inbound(data)
+            self._capabilities_pushed.set()
 
     async def _reject_server_request(self, req_id: Any, method: str) -> None:
         """Answer an unsupported server->client request instead of swallowing it."""
@@ -321,28 +383,18 @@ class LSPClient:
         return pending
 
     async def drain_notifications(self, window: float = 0.1):
-        """Consume pending server->client traffic until the stream goes quiet."""
-        if self._lock.locked():
-            # Already inside request()/_initialize(); read directly to avoid deadlock.
-            await self._drain(window)
-        else:
-            async with self._lock:
-                await self._drain(window)
+        """Wait up to ``window`` seconds for server->client traffic to arrive.
 
-    async def _drain(self, window: float):
-        while True:
-            try:
-                data = await self._read_message(window)
-            except (asyncio.TimeoutError, asyncio.IncompleteReadError, LSPConnectionLost):
-                break
-            except (LSPProtocolError, json.JSONDecodeError):
-                continue
-
-            msg_id = data.get("id")
-            if msg_id is not None and "method" in data:
-                await self._reject_server_request(msg_id, data["method"])
-            elif msg_id is None:
-                self._handle_inbound(data)
+        Returns as soon as a notification lands, and never later than ``window``: the
+        background reader records traffic as it comes, so this only waits.
+        """
+        if self.writer is None or window <= 0:
+            return
+        self._inbound.clear()
+        try:
+            await asyncio.wait_for(self._inbound.wait(), timeout=window)
+        except asyncio.TimeoutError:
+            pass
 
 
 def canonical_key(uri_or_path: str) -> str:

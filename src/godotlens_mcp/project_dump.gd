@@ -23,6 +23,8 @@ func _init() -> void:
 		"application": {
 			"name": ProjectSettings.get_setting("application/config/name", ""),
 			"main_scene": ProjectSettings.get_setting("application/run/main_scene", ""),
+			"main_scene_exists": _main_scene_exists(),
+			"main_loop_type": str(ProjectSettings.get_setting("application/run/main_loop_type", "SceneTree")),
 			"features": _features(),
 		},
 	}
@@ -47,6 +49,8 @@ func _autoloads() -> Array:
 			"name": key.trim_prefix("autoload/"),
 			"path": path,
 			"is_node": is_node,
+			# A missing autoload script fails at startup, before any of the game runs.
+			"exists": ResourceLoader.exists(path),
 		})
 	return found
 
@@ -97,3 +101,13 @@ func _features() -> Array:
 	for item in value:
 		out.append(String(item))
 	return out
+
+
+func _main_scene_exists() -> bool:
+	var path := str(ProjectSettings.get_setting("application/run/main_scene", ""))
+	if path.is_empty():
+		return true
+	if path.begins_with("uid://"):
+		var id := ResourceUID.text_to_id(path)
+		return ResourceUID.has_id(id) and ResourceLoader.exists(ResourceUID.get_id_path(id))
+	return ResourceLoader.exists(path)

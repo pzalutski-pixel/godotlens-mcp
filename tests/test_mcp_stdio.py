@@ -6,6 +6,7 @@ handle_request() and the main read loop were never exercised in a live process. 
 """
 
 
+import asyncio
 import json
 
 import pytest
@@ -83,6 +84,65 @@ def test_status_tool_reports_disconnected_cleanly(mcp_process, godot_project):
     payload, _ = proc.call_tool("gdscript_status", {})
     assert payload["status"] == "disconnected"
     assert payload["port"] == 16
+
+
+@pytest.mark.integration
+def test_engine_tools_work_with_no_editor_running(mcp_process, godot_project, godot_binary):
+    """project_config and scene_state run the Godot binary; the LSP is irrelevant.
+
+    Regression: both were refused because the language server was unreachable.
+    """
+    proc = mcp_process(cwd=godot_project, env={"GODOT_LSP_PORT": "16", "GODOT_BIN": godot_binary})
+    proc.initialize()
+
+    config, is_error = proc.call_tool("project_config", {})
+    assert not is_error, config
+    assert "GameState" in {a["name"] for a in config["autoloads"]}
+
+    scenes, is_error = proc.call_tool("scene_state", {"files": ["main.tscn"]})
+    assert not is_error, scenes
+    assert "res://main.tscn" in scenes["scenes"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_call_does_not_hold_up_a_fast_one(fake_dap, mcp_process, godot_project):
+    """Agents sharing one GodotLens must not queue behind each other.
+
+    Regression: the main loop finished each call before reading the next, so one
+    agent's debug_run stalled every other agent's hover for its whole duration.
+    """
+    proc = mcp_process(cwd=godot_project, env={
+        "GODOT_LSP_PORT": "16", "GODOT_DAP_PORT": str(fake_dap.port)})
+    await asyncio.to_thread(proc.initialize)
+
+    def call(req_id, name, arguments):
+        proc.send_raw(json.dumps({"jsonrpc": "2.0", "id": req_id, "method": "tools/call",
+                                  "params": {"name": name, "arguments": arguments}}))
+
+    call(101, "debug_output", {"wait": 3})
+    call(102, "gdscript_status", {})
+    first = await asyncio.to_thread(proc.read)
+    second = await asyncio.to_thread(proc.read)
+    assert [first["id"], second["id"]] == [102, 101]
+
+
+def test_status_reports_the_server_pid(mcp_process, godot_project):
+    """Lets an operator confirm whether several agents share one GodotLens.
+
+    Compared between calls rather than against Popen's pid: on Windows a venv's
+    python.exe is a launcher whose child is the real server.
+    """
+    env = {"GODOT_LSP_PORT": "16"}
+    first = mcp_process(cwd=godot_project, env=env)
+    first.initialize()
+    second = mcp_process(cwd=godot_project, env=env)
+    second.initialize()
+
+    a, _ = first.call_tool("gdscript_status", {})
+    again, _ = first.call_tool("gdscript_status", {})
+    other, _ = second.call_tool("gdscript_status", {})
+    assert a["server_pid"] == again["server_pid"]
+    assert a["server_pid"] != other["server_pid"]
 
 
 def test_stdout_carries_only_jsonrpc(mcp_process, godot_project):
@@ -185,6 +245,20 @@ def test_engine_api_returns_real_signatures(mcp_process, live_lsp):
     assert not is_error, payload
     assert "move_and_slide" in json.dumps(payload)
     assert "bool" in json.dumps(payload), "expected the real return type"
+
+
+@pytest.mark.integration
+def test_engine_api_finds_a_member_declared_on_an_ancestor(mcp_process, live_lsp):
+    """Godot's nativeSymbol searches only the named class; add_child is on Node."""
+    port, project = live_lsp
+    proc = mcp_process(cwd=project, env={"GODOT_LSP_PORT": str(port)})
+    proc.initialize()
+
+    payload, is_error = proc.call_tool(
+        "gdscript_engine_api", {"class_name": "CharacterBody2D", "member": "add_child"})
+    assert not is_error, payload
+    assert payload["declared_in"] == "Node"
+    assert "add_child" in json.dumps(payload)
 
 
 @pytest.mark.integration
